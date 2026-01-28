@@ -1,0 +1,10 @@
+# Arquivos e pastas a serem ignorados ao publicar/instalar o pacote
+node_modules/
+dist/
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.tgz
+bun.lock

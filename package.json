@@ -1,0 +1,76 @@
+{
+  "name": "vite-plugin-react-app-router",
+  "version": "0.1.0",
+  "description": "Vite plugin that brings Next.js App Router file-based routing to standard React projects",
+  "module": "src/index.ts",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jraylan/vite-plugin-react-app-router.git"
+  },
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "require": "./src/index.ts",
+      "types": "./src/index.ts"
+    },
+    "./client": {
+      "import": "./src/client.ts",
+      "types": "./src/client.d.ts"
+    },
+    "./types": {
+      "types": "./src/virtual-module.d.ts"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "types": [
+        "./src/virtual-module.d.ts"
+      ]
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "vite",
+    "vite-plugin",
+    "react",
+    "router",
+    "app-router",
+    "next.js",
+    "file-based-routing"
+  ],
+  "author": "jraylan",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/babel__generator": "^7.27.0",
+    "@types/bun": "^1.3.7",
+    "@types/node": "^25.0.10",
+    "vite": "^7.3.1"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0",
+    "react-dom": "^18.0.0 || ^19.0.0",
+    "react-router-dom": "^6.0.0 || ^7.0.0",
+    "typescript": "^5",
+    "vite": "^6.0.0 || ^7.0.0"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@babel/generator": "^7.28.6",
+    "@babel/types": "^7.28.6"
+  }
+}
