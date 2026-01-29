@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.2...v0.1.3) (2026-01-29)
+
+
+### Bug Fixes
+
+* fix error generate is not a function ([b81ef2d](https://github.com/jraylan/vite-plugin-react-app-router/commit/b81ef2d5e1a9c603fd88fa167d75e1d69afca249))
+
 ## [0.1.2](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.1...v0.1.2) (2026-01-29)
 
 
