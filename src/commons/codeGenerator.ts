@@ -281,6 +281,26 @@ function collectImports(
             }
             notFoundMap.set(route.notFoundPath, notFoundName);
         }
+
+        // Import all not-found components from layoutNotFoundMap
+        if (route.layoutNotFoundMap) {
+            for (const [, notFoundPath] of route.layoutNotFoundMap) {
+                if (!seenNotFound.has(notFoundPath)) {
+                    seenNotFound.add(notFoundPath);
+                    const notFoundName = `NotFound${notFoundIndex++}`;
+                    const notFoundImportPath = normalizeImportPath(notFoundPath, rootDir);
+
+                    if (lazy) {
+                        statements.push(createLazyImport(notFoundName, notFoundImportPath));
+                    } else {
+                        statements.push(
+                            createImportDeclaration([createDefaultImport(notFoundName)], `/${notFoundImportPath}`)
+                        );
+                    }
+                    notFoundMap.set(notFoundPath, notFoundName);
+                }
+            }
+        }
     }
 
     // Import root not-found if provided and not already imported
@@ -310,6 +330,7 @@ function buildRouteExpression(
     layoutMap: Map<string, string>,
     loadingMap: Map<string, string>,
     errorMap: Map<string, string>,
+    notFoundMap: Map<string, string>,
     lazy: boolean
 ): t.ObjectExpression {
     const pageName = componentMap.get(route.pagePath)!;
@@ -333,6 +354,13 @@ function buildRouteExpression(
         return createRouteObject(props);
     };
 
+    // Helper to get the not-found component name for a layout
+    const getLayoutNotFoundName = (layoutPath: string): string | undefined => {
+        if (!route.layoutNotFoundMap) return undefined;
+        const notFoundPath = route.layoutNotFoundMap.get(layoutPath);
+        return notFoundPath ? notFoundMap.get(notFoundPath) : undefined;
+    };
+
     // If there are inner layouts (more than just root), create nested structure
     if (route.layouts.length > 1) {
         // Build from innermost to outermost (excluding root layout)
@@ -348,10 +376,26 @@ function buildRouteExpression(
 
         // Wrap with inner layouts (from innermost to outermost, excluding root)
         for (let i = route.layouts.length - 1; i >= 1; i--) {
-            const innerLayoutName = layoutMap.get(route.layouts[i]!)!;
+            const layoutPath = route.layouts[i]!;
+            const innerLayoutName = layoutMap.get(layoutPath)!;
+            const layoutNotFoundName = getLayoutNotFoundName(layoutPath);
+
+            // Build children array with the inner route
+            const childrenRoutes: t.ObjectExpression[] = [innerRoute];
+
+            // Add catch-all not-found route for this layout if it has one
+            if (layoutNotFoundName) {
+                childrenRoutes.push(
+                    createRouteObject([
+                        createRouteProperty('path', t.stringLiteral('*')),
+                        createRouteProperty('element', createSuspenseWrapper(layoutNotFoundName, lazy)),
+                    ])
+                );
+            }
+
             innerRoute = createRouteObject([
                 createRouteProperty('element', createSuspenseWrapper(innerLayoutName, lazy, loadingName)),
-                createRouteProperty('children', t.arrayExpression([innerRoute])),
+                createRouteProperty('children', t.arrayExpression(childrenRoutes)),
             ]);
         }
 
@@ -433,7 +477,7 @@ function generateRoutesAST(
         const rootErrorName = rootContext.errorPath ? errorMap.get(rootContext.errorPath) : undefined;
 
         const childRoutes = layoutRoutes.map((route) =>
-            buildRouteExpression(route, componentMap, layoutMap, loadingMap, errorMap, lazy)
+            buildRouteExpression(route, componentMap, layoutMap, loadingMap, errorMap, notFoundMap, lazy)
         );
 
         const rootRouteProps: t.ObjectProperty[] = [

@@ -214,7 +214,11 @@ Error components are inherited by child routes. If a child route throws an error
 
 ## Not Found Component Example
 
-The `not-found.tsx` file in the app root is used as a catch-all route for unmatched paths:
+The `not-found.tsx` file is used as a catch-all route for unmatched paths. It can be placed at different levels:
+
+### Root Not Found (replaces everything)
+
+When placed in the app root (`src/app/not-found.tsx`), it replaces the entire page including the layout:
 
 ```tsx
 // src/app/not-found.tsx
@@ -230,6 +234,27 @@ export default function NotFound() {
   );
 }
 ```
+
+### Nested Not Found (renders inside layout)
+
+When placed inside a route directory with a layout, it renders inside that layout's `<Outlet />`:
+
+```tsx
+// src/app/dashboard/not-found.tsx
+import { Link } from "react-router-dom";
+
+export default function DashboardNotFound() {
+  return (
+    <div className="dashboard-not-found">
+      <h1>Page not found in Dashboard</h1>
+      <p>This dashboard page doesn't exist.</p>
+      <Link to="/dashboard">Go back to dashboard</Link>
+    </div>
+  );
+}
+```
+
+This allows you to have custom 404 pages for different sections of your app while preserving the section's layout (navigation, sidebar, etc.).
 
 ## Plugin Options
 

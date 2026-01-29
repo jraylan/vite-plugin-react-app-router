@@ -48,6 +48,8 @@ export interface ParsedRoute {
     errorPath?: string;
     /** Not found component path (closest to the route) */
     notFoundPath?: string;
+    /** Map of layout path to its specific not-found component (for nested not-found support) */
+    layoutNotFoundMap?: Map<string, string>;
 }
 
 export interface PluginOptions {

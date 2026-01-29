@@ -181,6 +181,8 @@ interface ParentContext {
     loadingPath?: string;
     errorPath?: string;
     notFoundPath?: string;
+    /** Map of layout path to its specific not-found component */
+    layoutNotFoundMap: Map<string, string>;
 }
 
 /**
@@ -188,7 +190,7 @@ interface ParentContext {
  */
 export function flattenRoutes(
     nodes: RouteNode[],
-    parentContext: ParentContext = { layouts: [] },
+    parentContext: ParentContext = { layouts: [], layoutNotFoundMap: new Map() },
     rootContext?: { layoutPath?: string; loadingPath?: string; errorPath?: string; notFoundPath?: string }
 ): ParsedRoute[] {
     const routes: ParsedRoute[] = [];
@@ -200,16 +202,30 @@ export function flattenRoutes(
             loadingPath: rootContext.loadingPath || parentContext.loadingPath,
             errorPath: rootContext.errorPath || parentContext.errorPath,
             notFoundPath: rootContext.notFoundPath || parentContext.notFoundPath,
+            layoutNotFoundMap: new Map(parentContext.layoutNotFoundMap),
         }
         : parentContext;
 
+    // If root has a layout and not-found, add to map
+    if (rootContext?.layoutPath && rootContext?.notFoundPath) {
+        context.layoutNotFoundMap.set(rootContext.layoutPath, rootContext.notFoundPath);
+    }
+
     for (const node of nodes) {
         // Build current context - child values override parent values
+        const currentLayoutNotFoundMap = new Map(context.layoutNotFoundMap);
+
+        // If this node has a layout and a not-found, add to map
+        if (node.layoutPath && node.notFoundPath) {
+            currentLayoutNotFoundMap.set(node.layoutPath, node.notFoundPath);
+        }
+
         const currentContext: ParentContext = {
             layouts: node.layoutPath ? [...context.layouts, node.layoutPath] : context.layouts,
             loadingPath: node.loadingPath || context.loadingPath,
             errorPath: node.errorPath || context.errorPath,
             notFoundPath: node.notFoundPath || context.notFoundPath,
+            layoutNotFoundMap: currentLayoutNotFoundMap,
         };
 
         // If the node has a page, add the route
@@ -221,6 +237,7 @@ export function flattenRoutes(
                 loadingPath: currentContext.loadingPath,
                 errorPath: currentContext.errorPath,
                 notFoundPath: currentContext.notFoundPath,
+                layoutNotFoundMap: new Map(currentContext.layoutNotFoundMap),
             });
         }
 
@@ -275,7 +292,13 @@ export function parseAppRouter(options: PluginOptions = {}): {
 
     const tree = scanAppDirectory(appDir, extensions);
     const root = getRootPage(appDir, extensions);
-    const routes = flattenRoutes(tree, { layouts: [] }, root);
+    const routes = flattenRoutes(tree, { layouts: [], layoutNotFoundMap: new Map() }, root);
+
+    // Build the root layoutNotFoundMap
+    const rootLayoutNotFoundMap = new Map<string, string>();
+    if (root.layoutPath && root.notFoundPath) {
+        rootLayoutNotFoundMap.set(root.layoutPath, root.notFoundPath);
+    }
 
     // Add the root route if it exists
     if (root.pagePath) {
@@ -286,6 +309,7 @@ export function parseAppRouter(options: PluginOptions = {}): {
             loadingPath: root.loadingPath,
             errorPath: root.errorPath,
             notFoundPath: root.notFoundPath,
+            layoutNotFoundMap: rootLayoutNotFoundMap,
         });
     }
 
