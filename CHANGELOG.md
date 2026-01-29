@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.4](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.3...v0.1.4) (2026-01-29)
+
+
+### Features
+
+* add debug option to visualize generated routes code ([ac92bc7](https://github.com/jraylan/vite-plugin-react-app-router/commit/ac92bc7e96788c417bec7892b4a0e64ec97be35b))
+* add support for not-found.tsx in nested routes ([19e0aa4](https://github.com/jraylan/vite-plugin-react-app-router/commit/19e0aa4be21ff1320513bd5aaded39eb99a47f84))
+* implement loading.tsx, error.tsx and not-found.tsx support ([e85a67a](https://github.com/jraylan/vite-plugin-react-app-router/commit/e85a67a17ce48d67dfcbbc7b520439e5e232f223))
+
 ## [0.1.3](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.2...v0.1.3) (2026-01-29)
 
 
