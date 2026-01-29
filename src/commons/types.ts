@@ -57,6 +57,12 @@ export interface PluginOptions {
     appDir?: string;
     /** Supported file extensions */
     extensions?: string[];
+    /** 
+     * Debug mode to visualize generated code
+     * - true or 'console': logs to console
+     * - string path: writes to file (e.g., './debug-routes.js')
+     */
+    debug?: boolean | 'console' | string;
 }
 
 export interface GeneratedRouteCode {

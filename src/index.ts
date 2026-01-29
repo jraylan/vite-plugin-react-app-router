@@ -42,6 +42,11 @@ export default function reactAppRouterPlugin(options: PluginOptions = {}): Plugi
             currentModule = env.command === 'serve' ? serverModule : buildModule;
             context.handler = currentModule.default;
 
+            // Pass options to the module
+            if (currentModule.setOptions) {
+                currentModule.setOptions(options);
+            }
+
             if (context.handler?.config) {
                 return context.handler.config.bind(this)(config, env);
             }

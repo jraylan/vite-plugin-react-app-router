@@ -264,8 +264,44 @@ interface PluginOptions {
   appDir?: string;
   /** Supported file extensions */
   extensions?: string[];
+  /**
+   * Debug mode to visualize generated code
+   * - true or 'console': logs to console
+   * - string path: writes to file (e.g., './debug-routes.js')
+   */
+  debug?: boolean | "console" | string;
 }
 ```
+
+### Debug Mode
+
+To analyze the generated routes code and understand the overhead, enable debug mode:
+
+```typescript
+// vite.config.ts
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import reactAppRouter from "vite-plugin-react-app-router";
+
+export default defineConfig({
+  plugins: [
+    react(),
+    reactAppRouter({
+      // Log to console
+      debug: true,
+      // Or write to a file
+      // debug: './debug-routes.js',
+    }),
+  ],
+});
+```
+
+This will output the generated virtual module code, allowing you to:
+
+- See the exact routes structure being generated
+- Analyze import statements and lazy loading
+- Identify optimization opportunities
+- Debug routing issues
 
 ## Private Folders
 
