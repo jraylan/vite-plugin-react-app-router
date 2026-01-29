@@ -7,8 +7,8 @@
 
 import * as t from '@babel/types';
 import generate from '@babel/generator';
-import type { ParsedRoute } from './types.ts';
-import { pathToIdentifier } from './routeParser.ts';
+import type { ParsedRoute } from './types.js';
+import { pathToIdentifier } from './routeParser.js';
 
 export interface CodeGeneratorOptions {
     /** Project root directory (for relative imports) */
@@ -473,4 +473,16 @@ export function generateDevRoutesCode(
     options: CodeGeneratorOptions
 ): string {
     return generateRoutesCode(routes, { ...options, lazy: true });
+}
+
+/**
+ * Generates empty routes code (fallback when no routes exist)
+ */
+export function generateEmptyRoutesCode(): string {
+    const ast = generateEmptyRoutesAST();
+    const output = generate(ast, {
+        comments: true,
+        compact: false,
+    });
+    return output.code;
 }

@@ -6,14 +6,14 @@
  */
 
 import type { Plugin } from 'vite';
-import type { PluginOptions } from './commons/types.ts';
+import type { PluginOptions } from './commons/types.js';
 
 // Import handlers and resolution functions
-import * as serverModule from './server/index.ts';
-import * as buildModule from './build/index.ts';
+import * as serverModule from './server/index.js';
+import * as buildModule from './build/index.js';
 
 // Re-export types from virtual module so client projects have access
-export type { PluginOptions } from './commons/types.ts';
+export type { PluginOptions } from './commons/types.js';
 
 // Virtual module ID constant for external use
 export const VIRTUAL_MODULE_ID = 'virtual:app-router';

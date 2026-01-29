@@ -5,7 +5,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import type { RouteNode, ParsedRoute, PluginOptions } from './types.ts';
+import type { RouteNode, ParsedRoute, PluginOptions } from './types.js';
 
 const DEFAULT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js'];
 

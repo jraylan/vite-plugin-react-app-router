@@ -57,7 +57,7 @@ jobs:
               uses: actions/attest-build-provenance@v2
               id: attestation
               with:
-                  subject-path: "src/**"
+                  subject-path: "dist/**"
 
             - name: Add provenance to release
               uses: softprops/action-gh-release@v1

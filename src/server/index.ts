@@ -3,9 +3,9 @@
  * Implements JIT route generation via virtual module
  */
 
-import type { PluginHookHandler } from "../commons/types.ts";
+import type { PluginHookHandler } from "../commons/types.js";
 import type { ResolvedConfig, ViteDevServer, HmrContext } from "vite";
-import { parseAppRouter, generateDevRoutesCode, type PluginOptions } from "../commons/index.ts";
+import { parseAppRouter, generateDevRoutesCode, generateEmptyRoutesCode, type PluginOptions } from "../commons/index.js";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -29,7 +29,7 @@ const ctx: ServerContext = {
  */
 function regenerateRoutes(): string {
     if (!ctx.config) {
-        return 'export default function AppRouter() { return null; }';
+        return generateEmptyRoutesCode();
     }
 
     const rootDir = ctx.config.root;
@@ -38,17 +38,7 @@ function regenerateRoutes(): string {
 
     if (!fs.existsSync(appDir)) {
         console.warn(`[vite-plugin-react-app-router] App directory not found: ${appDir}`);
-        return `
-import { createBrowserRouter, RouterProvider } from 'react-router-dom';
-
-const router = createBrowserRouter([]);
-
-export function AppRouter() {
-    return <RouterProvider router={router} />;
-}
-
-export default AppRouter;
-`;
+        return generateEmptyRoutesCode();
     }
 
     const { routes } = parseAppRouter({

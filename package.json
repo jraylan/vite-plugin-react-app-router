@@ -2,9 +2,9 @@
   "name": "vite-plugin-react-app-router",
   "version": "0.1.1",
   "description": "Vite plugin that brings Next.js App Router file-based routing to standard React projects",
-  "module": "src/index.ts",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "module": "dist/index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "type": "module",
   "repository": {
     "type": "git",
@@ -12,31 +12,30 @@
   },
   "exports": {
     ".": {
-      "import": "./src/index.ts",
-      "require": "./src/index.ts",
-      "types": "./src/index.ts"
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
     },
     "./client": {
-      "import": "./src/client.ts",
-      "types": "./src/client.d.ts"
+      "import": "./dist/client.js",
+      "types": "./dist/client.d.ts"
     },
     "./types": {
-      "types": "./src/virtual-module.d.ts"
+      "types": "./dist/virtual-module.d.ts"
     }
   },
   "typesVersions": {
     "*": {
       "types": [
-        "./src/virtual-module.d.ts"
+        "./dist/virtual-module.d.ts"
       ]
     }
   },
   "files": [
-    "dist",
-    "src"
+    "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/virtual-module.d.ts dist/",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build"
   },
