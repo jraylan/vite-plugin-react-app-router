@@ -6,9 +6,12 @@
  */
 
 import * as t from '@babel/types';
-import generate from '@babel/generator';
+import _generate from '@babel/generator';
 import type { ParsedRoute } from './types.js';
 import { pathToIdentifier } from './routeParser.js';
+
+// Handle both ESM and CJS default exports
+const generate = typeof _generate === 'function' ? _generate : (_generate as { default: typeof _generate }).default;
 
 export interface CodeGeneratorOptions {
     /** Project root directory (for relative imports) */

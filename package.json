@@ -35,7 +35,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc && cp src/virtual-module.d.ts dist/",
+    "build": "tsc && cp src/virtual-module.d.ts dist",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build"
   },
