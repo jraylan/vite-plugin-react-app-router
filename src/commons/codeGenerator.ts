@@ -13,13 +13,6 @@ import { pathToIdentifier } from './routeParser.js';
 // Handle both ESM and CJS default exports
 const generate = typeof _generate === 'function' ? _generate : (_generate as { default: typeof _generate }).default;
 
-export interface CodeGeneratorOptions {
-    /** Project root directory (for relative imports) */
-    rootDir: string;
-    /** Whether to use lazy loading */
-    lazy?: boolean;
-}
-
 /**
  * Normalizes the path for import (converts backslashes and removes extension)
  */
@@ -105,9 +98,19 @@ function createCreateElementCallExpression(
 
 /**
  * Creates a Suspense wrapper with createElement
+ * @param componentName - The component to wrap
+ * @param lazy - Whether lazy loading is enabled
+ * @param loadingComponentName - Optional custom loading component name
  */
-function createSuspenseWrapper(componentName: string, lazy: boolean): t.CallExpression {
-    const fallback = createCreateElementCallExpression('div', t.nullLiteral(), [t.stringLiteral('Loading...')], true);
+function createSuspenseWrapper(
+    componentName: string,
+    lazy: boolean,
+    loadingComponentName?: string
+): t.CallExpression {
+    // If a custom loading component is provided, use it; otherwise use a simple div
+    const fallback = loadingComponentName
+        ? createCreateElementCallExpression(loadingComponentName, t.nullLiteral(), [])
+        : createCreateElementCallExpression('div', t.nullLiteral(), [t.stringLiteral('Loading...')], true);
 
     if (lazy) {
         return createCreateElementCallExpression(
@@ -141,6 +144,9 @@ interface CollectedImports {
     statements: t.Statement[];
     componentMap: Map<string, string>;
     layoutMap: Map<string, string>;
+    loadingMap: Map<string, string>;
+    errorMap: Map<string, string>;
+    notFoundMap: Map<string, string>;
 }
 
 /**
@@ -149,15 +155,25 @@ interface CollectedImports {
 function collectImports(
     routes: ParsedRoute[],
     rootDir: string,
-    lazy: boolean
+    lazy: boolean,
+    rootNotFound?: string
 ): CollectedImports {
     const statements: t.Statement[] = [];
     const componentMap = new Map<string, string>();
     const layoutMap = new Map<string, string>();
+    const loadingMap = new Map<string, string>();
+    const errorMap = new Map<string, string>();
+    const notFoundMap = new Map<string, string>();
 
     let pageIndex = 0;
     let layoutIndex = 0;
+    let loadingIndex = 0;
+    let errorIndex = 0;
+    let notFoundIndex = 0;
     const seenLayouts = new Set<string>();
+    const seenLoading = new Set<string>();
+    const seenError = new Set<string>();
+    const seenNotFound = new Set<string>();
 
     // Import from react-router-dom
     statements.push(
@@ -217,9 +233,72 @@ function collectImports(
                 layoutMap.set(layoutPath, layoutName);
             }
         }
+
+        // Loading component import
+        if (route.loadingPath && !seenLoading.has(route.loadingPath)) {
+            seenLoading.add(route.loadingPath);
+            const loadingName = `Loading${loadingIndex++}`;
+            const loadingImportPath = normalizeImportPath(route.loadingPath, rootDir);
+
+            if (lazy) {
+                statements.push(createLazyImport(loadingName, loadingImportPath));
+            } else {
+                statements.push(
+                    createImportDeclaration([createDefaultImport(loadingName)], `/${loadingImportPath}`)
+                );
+            }
+            loadingMap.set(route.loadingPath, loadingName);
+        }
+
+        // Error component import
+        if (route.errorPath && !seenError.has(route.errorPath)) {
+            seenError.add(route.errorPath);
+            const errorName = `ErrorBoundary${errorIndex++}`;
+            const errorImportPath = normalizeImportPath(route.errorPath, rootDir);
+
+            if (lazy) {
+                statements.push(createLazyImport(errorName, errorImportPath));
+            } else {
+                statements.push(
+                    createImportDeclaration([createDefaultImport(errorName)], `/${errorImportPath}`)
+                );
+            }
+            errorMap.set(route.errorPath, errorName);
+        }
+
+        // Not found component import
+        if (route.notFoundPath && !seenNotFound.has(route.notFoundPath)) {
+            seenNotFound.add(route.notFoundPath);
+            const notFoundName = `NotFound${notFoundIndex++}`;
+            const notFoundImportPath = normalizeImportPath(route.notFoundPath, rootDir);
+
+            if (lazy) {
+                statements.push(createLazyImport(notFoundName, notFoundImportPath));
+            } else {
+                statements.push(
+                    createImportDeclaration([createDefaultImport(notFoundName)], `/${notFoundImportPath}`)
+                );
+            }
+            notFoundMap.set(route.notFoundPath, notFoundName);
+        }
     }
 
-    return { statements, componentMap, layoutMap };
+    // Import root not-found if provided and not already imported
+    if (rootNotFound && !seenNotFound.has(rootNotFound)) {
+        const notFoundName = `NotFound${notFoundIndex++}`;
+        const notFoundImportPath = normalizeImportPath(rootNotFound, rootDir);
+
+        if (lazy) {
+            statements.push(createLazyImport(notFoundName, notFoundImportPath));
+        } else {
+            statements.push(
+                createImportDeclaration([createDefaultImport(notFoundName)], `/${notFoundImportPath}`)
+            );
+        }
+        notFoundMap.set(rootNotFound, notFoundName);
+    }
+
+    return { statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap };
 }
 
 /**
@@ -229,22 +308,40 @@ function buildRouteExpression(
     route: ParsedRoute,
     componentMap: Map<string, string>,
     layoutMap: Map<string, string>,
+    loadingMap: Map<string, string>,
+    errorMap: Map<string, string>,
     lazy: boolean
 ): t.ObjectExpression {
     const pageName = componentMap.get(route.pagePath)!;
     const isIndex = route.pattern === '/';
     const path = isIndex ? '' : route.pattern.replace(/^\//, '');
-    const pageElement = createSuspenseWrapper(pageName, lazy);
+
+    // Get loading and error component names if available
+    const loadingName = route.loadingPath ? loadingMap.get(route.loadingPath) : undefined;
+    const errorName = route.errorPath ? errorMap.get(route.errorPath) : undefined;
+
+    const pageElement = createSuspenseWrapper(pageName, lazy, loadingName);
+
+    // Build the base route properties
+    const buildRouteProps = (props: t.ObjectProperty[]): t.ObjectExpression => {
+        // Add errorElement if error component exists
+        if (errorName) {
+            props.push(
+                createRouteProperty('errorElement', createCreateElementCallExpression(errorName, t.nullLiteral(), []))
+            );
+        }
+        return createRouteObject(props);
+    };
 
     // If there are inner layouts (more than just root), create nested structure
     if (route.layouts.length > 1) {
         // Build from innermost to outermost (excluding root layout)
         let innerRoute: t.ObjectExpression = isIndex
-            ? createRouteObject([
+            ? buildRouteProps([
                 createRouteProperty('index', true),
                 createRouteProperty('element', pageElement),
             ])
-            : createRouteObject([
+            : buildRouteProps([
                 createRouteProperty('path', t.stringLiteral(path)),
                 createRouteProperty('element', pageElement),
             ]);
@@ -253,7 +350,7 @@ function buildRouteExpression(
         for (let i = route.layouts.length - 1; i >= 1; i--) {
             const innerLayoutName = layoutMap.get(route.layouts[i]!)!;
             innerRoute = createRouteObject([
-                createRouteProperty('element', createSuspenseWrapper(innerLayoutName, lazy)),
+                createRouteProperty('element', createSuspenseWrapper(innerLayoutName, lazy, loadingName)),
                 createRouteProperty('children', t.arrayExpression([innerRoute])),
             ]);
         }
@@ -263,16 +360,25 @@ function buildRouteExpression(
 
     // Simple route without nested layouts
     if (isIndex) {
-        return createRouteObject([
+        return buildRouteProps([
             createRouteProperty('index', true),
             createRouteProperty('element', pageElement),
         ]);
     }
 
-    return createRouteObject([
+    return buildRouteProps([
         createRouteProperty('path', t.stringLiteral(path)),
         createRouteProperty('element', pageElement),
     ]);
+}
+
+export interface CodeGeneratorOptions {
+    /** Project root directory (for relative imports) */
+    rootDir: string;
+    /** Whether to use lazy loading */
+    lazy?: boolean;
+    /** Root not-found component path */
+    rootNotFound?: string;
 }
 
 /**
@@ -282,13 +388,13 @@ function generateRoutesAST(
     routes: ParsedRoute[],
     options: CodeGeneratorOptions
 ): t.Program {
-    const { rootDir, lazy = true } = options;
+    const { rootDir, lazy = true, rootNotFound } = options;
 
     if (routes.length === 0) {
         return generateEmptyRoutesAST();
     }
 
-    const { statements, componentMap, layoutMap } = collectImports(routes, rootDir, lazy);
+    const { statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap } = collectImports(routes, rootDir, lazy, rootNotFound);
 
     // Group routes by root layout
     const routesByRootLayout = new Map<string, ParsedRoute[]>();
@@ -306,32 +412,74 @@ function generateRoutesAST(
         }
     }
 
+    // Find the most common root loading/error components for the root layout
+    const findRootContextComponents = (layoutRoutes: ParsedRoute[]) => {
+        // Use the first route's loading/error as root context (typically inherited from root)
+        const firstRoute = layoutRoutes[0];
+        return {
+            loadingPath: firstRoute?.loadingPath,
+            errorPath: firstRoute?.errorPath,
+        };
+    };
+
     // Build route definitions array
     const routeDefinitions: t.ObjectExpression[] = [];
 
     // Routes with root layout
     for (const [rootLayoutPath, layoutRoutes] of routesByRootLayout) {
         const rootLayoutName = layoutMap.get(rootLayoutPath)!;
+        const rootContext = findRootContextComponents(layoutRoutes);
+        const rootLoadingName = rootContext.loadingPath ? loadingMap.get(rootContext.loadingPath) : undefined;
+        const rootErrorName = rootContext.errorPath ? errorMap.get(rootContext.errorPath) : undefined;
+
         const childRoutes = layoutRoutes.map((route) =>
-            buildRouteExpression(route, componentMap, layoutMap, lazy)
+            buildRouteExpression(route, componentMap, layoutMap, loadingMap, errorMap, lazy)
         );
 
-        routeDefinitions.push(
-            createRouteObject([
-                createRouteProperty('path', t.stringLiteral('/')),
-                createRouteProperty('element', createSuspenseWrapper(rootLayoutName, lazy)),
-                createRouteProperty('children', t.arrayExpression(childRoutes)),
-            ])
-        );
+        const rootRouteProps: t.ObjectProperty[] = [
+            createRouteProperty('path', t.stringLiteral('/')),
+            createRouteProperty('element', createSuspenseWrapper(rootLayoutName, lazy, rootLoadingName)),
+            createRouteProperty('children', t.arrayExpression(childRoutes)),
+        ];
+
+        // Add errorElement to root layout if exists
+        if (rootErrorName) {
+            rootRouteProps.push(
+                createRouteProperty('errorElement', createCreateElementCallExpression(rootErrorName, t.nullLiteral(), []))
+            );
+        }
+
+        routeDefinitions.push(createRouteObject(rootRouteProps));
     }
 
     // Routes without layout
     for (const route of routesWithoutLayout) {
         const pageName = componentMap.get(route.pagePath)!;
+        const loadingName = route.loadingPath ? loadingMap.get(route.loadingPath) : undefined;
+        const errorName = route.errorPath ? errorMap.get(route.errorPath) : undefined;
+
+        const routeProps: t.ObjectProperty[] = [
+            createRouteProperty('path', t.stringLiteral(route.pattern)),
+            createRouteProperty('element', createSuspenseWrapper(pageName, lazy, loadingName)),
+        ];
+
+        if (errorName) {
+            routeProps.push(
+                createRouteProperty('errorElement', createCreateElementCallExpression(errorName, t.nullLiteral(), []))
+            );
+        }
+
+        routeDefinitions.push(createRouteObject(routeProps));
+    }
+
+    // Add catch-all not-found route at root level (outside of layout)
+    // Root not-found replaces everything, including the layout
+    if (rootNotFound && notFoundMap.has(rootNotFound)) {
+        const notFoundName = notFoundMap.get(rootNotFound)!;
         routeDefinitions.push(
             createRouteObject([
-                createRouteProperty('path', t.stringLiteral(route.pattern)),
-                createRouteProperty('element', createSuspenseWrapper(pageName, lazy)),
+                createRouteProperty('path', t.stringLiteral('*')),
+                createRouteProperty('element', createSuspenseWrapper(notFoundName, lazy)),
             ])
         );
     }

@@ -42,10 +42,12 @@ export interface ParsedRoute {
     pagePath: string;
     /** List of layouts to apply (from outermost to innermost) */
     layouts: string[];
-    /** Loading component path */
+    /** Loading component path (closest to the route) */
     loadingPath?: string;
-    /** Error component path */
+    /** Error component path (closest to the route) */
     errorPath?: string;
+    /** Not found component path (closest to the route) */
+    notFoundPath?: string;
 }
 
 export interface PluginOptions {

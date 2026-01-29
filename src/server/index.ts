@@ -41,12 +41,12 @@ function regenerateRoutes(): string {
         return generateEmptyRoutesCode();
     }
 
-    const { routes } = parseAppRouter({
+    const { routes, rootNotFound } = parseAppRouter({
         ...ctx.options,
         appDir,
     });
 
-    ctx.cachedCode = generateDevRoutesCode(routes, { rootDir, lazy: true });
+    ctx.cachedCode = generateDevRoutesCode(routes, { rootDir, lazy: true, rootNotFound });
     return ctx.cachedCode;
 }
 

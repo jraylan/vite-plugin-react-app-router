@@ -166,13 +166,21 @@ export function scanAppDirectory(
 export function getRootPage(
     appDir: string,
     extensions: string[] = DEFAULT_EXTENSIONS
-): { pagePath?: string; layoutPath?: string; loadingPath?: string; errorPath?: string } {
+): { pagePath?: string; layoutPath?: string; loadingPath?: string; errorPath?: string; notFoundPath?: string } {
     return {
         pagePath: findFileWithExtension(appDir, 'page', extensions),
         layoutPath: findFileWithExtension(appDir, 'layout', extensions),
         loadingPath: findFileWithExtension(appDir, 'loading', extensions),
         errorPath: findFileWithExtension(appDir, 'error', extensions),
+        notFoundPath: findFileWithExtension(appDir, 'not-found', extensions),
     };
+}
+
+interface ParentContext {
+    layouts: string[];
+    loadingPath?: string;
+    errorPath?: string;
+    notFoundPath?: string;
 }
 
 /**
@@ -180,31 +188,45 @@ export function getRootPage(
  */
 export function flattenRoutes(
     nodes: RouteNode[],
-    parentLayouts: string[] = [],
-    rootLayoutPath?: string
+    parentContext: ParentContext = { layouts: [] },
+    rootContext?: { layoutPath?: string; loadingPath?: string; errorPath?: string; notFoundPath?: string }
 ): ParsedRoute[] {
     const routes: ParsedRoute[] = [];
-    const layouts = rootLayoutPath ? [rootLayoutPath, ...parentLayouts] : parentLayouts;
+
+    // Merge root context with parent context
+    const context: ParentContext = rootContext
+        ? {
+            layouts: rootContext.layoutPath ? [rootContext.layoutPath, ...parentContext.layouts] : parentContext.layouts,
+            loadingPath: rootContext.loadingPath || parentContext.loadingPath,
+            errorPath: rootContext.errorPath || parentContext.errorPath,
+            notFoundPath: rootContext.notFoundPath || parentContext.notFoundPath,
+        }
+        : parentContext;
 
     for (const node of nodes) {
-        const currentLayouts = node.layoutPath
-            ? [...layouts, node.layoutPath]
-            : layouts;
+        // Build current context - child values override parent values
+        const currentContext: ParentContext = {
+            layouts: node.layoutPath ? [...context.layouts, node.layoutPath] : context.layouts,
+            loadingPath: node.loadingPath || context.loadingPath,
+            errorPath: node.errorPath || context.errorPath,
+            notFoundPath: node.notFoundPath || context.notFoundPath,
+        };
 
         // If the node has a page, add the route
         if (node.pagePath) {
             routes.push({
                 pattern: node.path || '/',
                 pagePath: node.pagePath,
-                layouts: currentLayouts,
-                loadingPath: node.loadingPath,
-                errorPath: node.errorPath,
+                layouts: currentContext.layouts,
+                loadingPath: currentContext.loadingPath,
+                errorPath: currentContext.errorPath,
+                notFoundPath: currentContext.notFoundPath,
             });
         }
 
         // Process children recursively
         if (node.children.length > 0) {
-            routes.push(...flattenRoutes(node.children, currentLayouts));
+            routes.push(...flattenRoutes(node.children, currentContext));
         }
     }
 
@@ -246,13 +268,14 @@ export function parseAppRouter(options: PluginOptions = {}): {
     tree: RouteNode[];
     rootLayout?: string;
     rootPage?: string;
+    rootNotFound?: string;
 } {
     const appDir = options.appDir || 'src/app';
     const extensions = options.extensions || DEFAULT_EXTENSIONS;
 
     const tree = scanAppDirectory(appDir, extensions);
     const root = getRootPage(appDir, extensions);
-    const routes = flattenRoutes(tree, [], root.layoutPath);
+    const routes = flattenRoutes(tree, { layouts: [] }, root);
 
     // Add the root route if it exists
     if (root.pagePath) {
@@ -262,6 +285,7 @@ export function parseAppRouter(options: PluginOptions = {}): {
             layouts: root.layoutPath ? [root.layoutPath] : [],
             loadingPath: root.loadingPath,
             errorPath: root.errorPath,
+            notFoundPath: root.notFoundPath,
         });
     }
 
@@ -270,5 +294,6 @@ export function parseAppRouter(options: PluginOptions = {}): {
         tree,
         rootLayout: root.layoutPath,
         rootPage: root.pagePath,
+        rootNotFound: root.notFoundPath,
     };
 }

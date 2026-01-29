@@ -38,13 +38,13 @@ function generateRoutes(): string {
         return generateEmptyRoutesCode();
     }
 
-    const { routes } = parseAppRouter({
+    const { routes, rootNotFound } = parseAppRouter({
         ...ctx.options,
         appDir,
     });
 
     // In build, we use static imports for better tree-shaking
-    ctx.generatedCode = generateBuildRoutesCode(routes, { rootDir, lazy: false });
+    ctx.generatedCode = generateBuildRoutesCode(routes, { rootDir, lazy: false, rootNotFound });
     return ctx.generatedCode;
 }
 

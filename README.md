@@ -19,8 +19,6 @@ A Vite plugin that brings **Next.js App Router** file-based routing to standard 
 
 ## Limitations
 
-- Only `page.tsx` and `layout.tsx` are currently supported
-- `loading.tsx`, `error.tsx`, and `not-found.tsx` are parsed but not yet functional
 - Server components are not supported (this is a client-side router)
 - Parallel routes and intercepting routes are not implemented
 
@@ -100,13 +98,13 @@ src/app/
 
 ## File Conventions
 
-| File            | Description                                 |
-| --------------- | ------------------------------------------- |
-| `page.tsx`      | Page component (required to create a route) |
-| `layout.tsx`    | Layout that wraps child pages               |
-| `loading.tsx`   | Loading component (not yet implemented)     |
-| `error.tsx`     | Error component (not yet implemented)       |
-| `not-found.tsx` | 404 component (not yet implemented)         |
+| File            | Description                                               |
+| --------------- | --------------------------------------------------------- |
+| `page.tsx`      | Page component (required to create a route)               |
+| `layout.tsx`    | Layout that wraps child pages                             |
+| `loading.tsx`   | Loading component (used as Suspense fallback)             |
+| `error.tsx`     | Error boundary component (catches errors in child routes) |
+| `not-found.tsx` | 404 component (catch-all route for unmatched paths)       |
 
 ## Dynamic Routes
 
@@ -170,6 +168,65 @@ export default function BlogPost() {
       <h1>Post: {slug}</h1>
       <Link to="/blog">Back to blog</Link>
     </article>
+  );
+}
+```
+
+## Loading Component Example
+
+The `loading.tsx` file is used as a Suspense fallback when lazy loading components. It will be shown while the page component is being loaded:
+
+```tsx
+// src/app/loading.tsx
+export default function Loading() {
+  return (
+    <div className="loading-spinner">
+      <span>Loading...</span>
+    </div>
+  );
+}
+```
+
+Loading components are inherited by child routes. If a child route doesn't have its own `loading.tsx`, it will use the nearest parent's loading component.
+
+## Error Component Example
+
+The `error.tsx` file is used as an error boundary. It receives the error via `useRouteError` from react-router-dom:
+
+```tsx
+// src/app/error.tsx
+import { useRouteError, Link } from "react-router-dom";
+
+export default function ErrorBoundary() {
+  const error = useRouteError() as Error;
+
+  return (
+    <div className="error-container">
+      <h1>Something went wrong</h1>
+      <p>{error?.message || "An unexpected error occurred"}</p>
+      <Link to="/">Go back home</Link>
+    </div>
+  );
+}
+```
+
+Error components are inherited by child routes. If a child route throws an error, the nearest parent's error boundary will catch it.
+
+## Not Found Component Example
+
+The `not-found.tsx` file in the app root is used as a catch-all route for unmatched paths:
+
+```tsx
+// src/app/not-found.tsx
+import { Link } from "react-router-dom";
+
+export default function NotFound() {
+  return (
+    <div className="not-found">
+      <h1>404 - Page Not Found</h1>
+      <p>The page you're looking for doesn't exist.</p>
+      <Link to="/">Go back home</Link>
+    </div>
   );
 }
 ```
