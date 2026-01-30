@@ -1,6 +1,6 @@
 {
   "name": "vite-plugin-react-app-router",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Vite plugin that brings Next.js App Router file-based routing to standard React projects",
   "module": "dist/index.js",
   "main": "dist/index.js",
