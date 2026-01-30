@@ -651,13 +651,14 @@ export function generateRoutesCode(
 }
 
 /**
- * Generates optimized code for build (tree-shaking friendly)
+ * Generates optimized code for build
+ * Uses lazy loading by default for code splitting
  */
 export function generateBuildRoutesCode(
     routes: ParsedRoute[],
     options: CodeGeneratorOptions
 ): string {
-    return generateRoutesCode(routes, { ...options, lazy: false });
+    return generateRoutesCode(routes, options);
 }
 
 /**
@@ -667,7 +668,7 @@ export function generateDevRoutesCode(
     routes: ParsedRoute[],
     options: CodeGeneratorOptions
 ): string {
-    return generateRoutesCode(routes, { ...options, lazy: true });
+    return generateRoutesCode(routes, options);
 }
 
 /**
