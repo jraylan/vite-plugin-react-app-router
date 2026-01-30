@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.4...v0.1.5) (2026-01-30)
+
+
+### Features
+
+* enable lazy loading by default for production builds ([13e9058](https://github.com/jraylan/vite-plugin-react-app-router/commit/13e90589dafe35e5c6f1fd6af36759b2cac1072d))
+
 ## [0.1.4](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.3...v0.1.4) (2026-01-29)
 
 
