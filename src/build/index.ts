@@ -70,8 +70,9 @@ function generateRoutes(): string {
         appDir,
     });
 
-    // In build, we use static imports for better tree-shaking
-    ctx.generatedCode = generateBuildRoutesCode(routes, { rootDir, lazy: false, rootNotFound });
+    // Use lazy loading by default for code splitting (can be disabled via options)
+    const lazy = ctx.options.lazy !== false;
+    ctx.generatedCode = generateBuildRoutesCode(routes, { rootDir, lazy, rootNotFound });
     outputDebug(ctx.generatedCode);
     return ctx.generatedCode;
 }

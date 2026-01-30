@@ -73,7 +73,9 @@ function regenerateRoutes(): string {
         appDir,
     });
 
-    ctx.cachedCode = generateDevRoutesCode(routes, { rootDir, lazy: true, rootNotFound });
+    // Use lazy loading by default for code splitting (can be disabled via options)
+    const lazy = ctx.options.lazy !== false;
+    ctx.cachedCode = generateDevRoutesCode(routes, { rootDir, lazy, rootNotFound });
     outputDebug(ctx.cachedCode);
     return ctx.cachedCode;
 }

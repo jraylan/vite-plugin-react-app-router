@@ -63,6 +63,12 @@ export interface PluginOptions {
      * - string path: writes to file (e.g., './debug-routes.js')
      */
     debug?: boolean | 'console' | string;
+    /**
+     * Enable lazy loading for pages and layouts (default: true)
+     * When enabled, pages are loaded on-demand using React.lazy() and dynamic imports,
+     * resulting in smaller initial bundle size and better performance.
+     */
+    lazy?: boolean;
 }
 
 export interface GeneratedRouteCode {

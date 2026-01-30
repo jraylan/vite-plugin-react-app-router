@@ -43,10 +43,20 @@ export default defineConfig({
     reactAppRouter({
       // App directory (default: 'src/app')
       appDir: "src/app",
+      // Enable lazy loading for code splitting (default: true)
+      lazy: true,
     }),
   ],
 });
 ```
+
+### Plugin Options
+
+| Option   | Type                             | Default     | Description                                                                                          |
+| -------- | -------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------- |
+| `appDir` | `string`                         | `'src/app'` | Directory containing the app router files                                                            |
+| `lazy`   | `boolean`                        | `true`      | Enable lazy loading using `React.lazy()` for code splitting. Results in smaller initial bundle size. |
+| `debug`  | `boolean \| 'console' \| string` | `false`     | Debug mode: `true`/`'console'` logs to console, string path writes to file                           |
 
 ### main.tsx
 
