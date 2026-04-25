@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.6...v0.1.7) (2026-04-25)
+
+
+### Features
+
+* add post install script ([9535258](https://github.com/jraylan/vite-plugin-react-app-router/commit/9535258dd08d8359bf251cba32549972373388e7))
+
 ## [0.1.6](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.5...v0.1.6) (2026-01-30)
 
 
