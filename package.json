@@ -40,7 +40,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "postbuild": "node scripts/postbuild.mjs",
+    "prebuild": "node scripts/prebuild.mjs",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build",
     "postinstall": "node scripts/postinstall.mjs"
