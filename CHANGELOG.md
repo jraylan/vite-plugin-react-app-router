@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.12](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.11...v0.1.12) (2026-04-25)
+
+
+### Miscellaneous Chores
+
+* release 0.1.12 ([8b5db53](https://github.com/jraylan/vite-plugin-react-app-router/commit/8b5db534e6386572c751473cc194446438288cb0))
+
 ## [0.1.11](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.10...v0.1.11) (2026-04-25)
 
 
