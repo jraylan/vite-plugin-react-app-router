@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.9...v0.1.9) (2026-04-25)
+
+
+### Miscellaneous Chores
+
+* replace bunx to npx ([a8222e2](https://github.com/jraylan/vite-plugin-react-app-router/commit/a8222e263f0ea4b25e6504fc4515313b6b46903a))
+
 ## [0.1.9](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.8...v0.1.9) (2026-04-25)
 
 
