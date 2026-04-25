@@ -39,30 +39,28 @@ jobs:
             - name: Setup Node.js
               uses: actions/setup-node@v4
               with:
-                  node-version: "20"
-                  registry-url: "https://registry.npmjs.org"
+                  node-version: "24"
 
             - name: Install dependencies
               run: npm install
 
-            - name: Build
-              run: npm run build
+            - name: Create tarball package
+              run: npm pack
 
             - name: Publish to npm with provenance
-              run: npm publish --access public --provenance
-              env:
-                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+              run: npm publish  *.tgz --access public --provenance
 
             - name: Generate artifact attestation
               uses: actions/attest-build-provenance@v2
               id: attestation
               with:
-                  subject-path: "dist/**"
+                  subject-path: "*.tgz"
 
             - name: Add provenance to release
               uses: softprops/action-gh-release@v1
               with:
                   tag_name: ${{ needs.release-please.outputs.tag_name }}
+                  files: "*.tgz"
                   append_body: true
                   body: |
                       ---
