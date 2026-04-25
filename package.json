@@ -40,9 +40,9 @@
     "src/virtual-module.d.ts"
   ],
   "scripts": {
-    "build": "bunx tsc",
+    "build": "npx tsc",
     "postbuild": "node scripts/postbuild.mjs",
-    "dev": "bunx tsc --watch",
+    "dev": "npx tsc --watch",
     "prepublishOnly": "npm run build",
     "postinstall": "node scripts/postinstall.mjs"
   },
