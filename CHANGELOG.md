@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.9...v0.1.10) (2026-04-25)
+
+
+### Bug Fixes
+
+* fix dependencies ([dd9af50](https://github.com/jraylan/vite-plugin-react-app-router/commit/dd9af50db7269320172165fda6716cba564e6715))
+
 ## [0.1.9](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.9...v0.1.9) (2026-04-25)
 
 
