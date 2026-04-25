@@ -42,25 +42,29 @@ jobs:
                   node-version: "24"
 
             - name: Install dependencies
-              run: npm install
+              run: npm ci
 
             - name: Create tarball package
-              run: npm pack
+              id: pack
+              run: |
+                  FILENAME=$(npm pack | tail -n 1)
+                  echo "filename=$FILENAME" >> $GITHUB_OUTPUT
 
             - name: Publish to npm with provenance
-              run: npm publish  *.tgz --access public --provenance
+              run: npm publish   ${{ steps.pack.outputs.filename }} --access public
+                  --provenance
 
             - name: Generate artifact attestation
               uses: actions/attest-build-provenance@v2
               id: attestation
               with:
-                  subject-path: "*.tgz"
+                  subject-path: " ${{ steps.pack.outputs.filename }}"
 
             - name: Add provenance to release
               uses: softprops/action-gh-release@v1
               with:
                   tag_name: ${{ needs.release-please.outputs.tag_name }}
-                  files: "*.tgz"
+                  files: " ${{ steps.pack.outputs.filename }}"
                   append_body: true
                   body: |
                       ---
