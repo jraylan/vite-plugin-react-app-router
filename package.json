@@ -32,12 +32,14 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "scripts"
   ],
   "scripts": {
     "build": "tsc && cp src/virtual-module.d.ts dist",
     "dev": "tsc --watch",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "postinstall": "node scripts/postinstall.mjs"
   },
   "keywords": [
     "vite",
