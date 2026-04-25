@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.13](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.12...v0.1.13) (2026-04-25)
+
+
+### Bug Fixes
+
+* fix broken package due to a bad build workflow ([e1621bc](https://github.com/jraylan/vite-plugin-react-app-router/commit/e1621bcbdc2dce35237768d05d7e0859257a04a4))
+
 ## [0.1.12](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.11...v0.1.12) (2026-04-25)
 
 
