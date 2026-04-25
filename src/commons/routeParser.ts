@@ -5,9 +5,24 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import type { RouteNode, ParsedRoute, PluginOptions } from './types.js';
+import type { RouteNode, ParsedRoute, InterceptedRoute, PluginOptions } from './types.js';
 
 const DEFAULT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js'];
+
+/**
+ * Matches Next.js intercepting-route markers at the start of a directory name:
+ *   (.)foo, (..)foo, (...)foo, (..)(..)foo, (..)(..)(..)foo, ...
+ *
+ * The `(...)` form (root) is mutually exclusive with the dot/dotdot forms, so
+ * we accept either: a single `(.)`/`(...)` or one-or-more `(..)` groups.
+ */
+const INTERCEPTING_MARKER_RE = /^(\(\.\.\.\)|\(\.\)|(?:\(\.\.\))+)(.+)$/;
+
+/**
+ * `'root'` for `(...)`, `'same'` for `(.)`, or the number of route levels to
+ * climb for `(..)`, `(..)(..)`, `(..)(..)(..)`, ...
+ */
+type InterceptLevel = 'root' | 'same' | number;
 
 /**
  * Checks if a file exists with one of the supported extensions
@@ -26,17 +41,39 @@ function findFileWithExtension(
     return undefined;
 }
 
-/**
- * Parses the segment name to extract dynamic route information
- */
-function parseSegment(segment: string): {
+interface SegmentInfo {
     isDynamic: boolean;
     isCatchAll: boolean;
     isOptionalCatchAll: boolean;
     isGroup: boolean;
     paramName?: string;
     routeSegment: string;
-} {
+    /** Set when the directory name starts with an intercepting marker */
+    interceptLevel?: InterceptLevel;
+}
+
+/**
+ * Parses the segment name to extract dynamic route and intercept information
+ */
+function parseSegment(segment: string): SegmentInfo {
+    // Intercepting routes: (.), (..), (...), (..)(..), ...
+    // The marker is followed by a regular segment name — recurse to parse it.
+    const interceptMatch = segment.match(INTERCEPTING_MARKER_RE);
+    if (interceptMatch) {
+        const marker = interceptMatch[1]!;
+        const rest = interceptMatch[2]!;
+        let level: InterceptLevel;
+        if (marker === '(.)') {
+            level = 'same';
+        } else if (marker === '(...)') {
+            level = 'root';
+        } else {
+            // One or more "(..)" groups concatenated — the count is the climb.
+            level = (marker.match(/\(\.\.\)/g) || []).length;
+        }
+        return { ...parseSegment(rest), interceptLevel: level };
+    }
+
     // Route group: (folder)
     if (segment.startsWith('(') && segment.endsWith(')')) {
         return {
@@ -98,12 +135,47 @@ function parseSegment(segment: string): {
 }
 
 /**
+ * Resolves an intercepting marker to the URL prefix it points at, given the
+ * route ancestors leading to the marker's parent (excluding route groups).
+ *
+ *   `(.)`        — same level as the marker's parent
+ *   `(..)`       — one route level above
+ *   `(..)(..)`   — two route levels above
+ *   `(...)`      — the app root
+ */
+function resolveInterceptBase(
+    routeAncestors: string[],
+    level: InterceptLevel
+): string[] {
+    if (level === 'root') return [];
+    if (level === 'same') return [...routeAncestors];
+    const climb = Math.min(level, routeAncestors.length);
+    return routeAncestors.slice(0, routeAncestors.length - climb);
+}
+
+/**
+ * Joins URL segments into an absolute pathname (always starts with `/`).
+ */
+function joinUrlSegments(segments: string[]): string {
+    if (segments.length === 0) return '/';
+    return '/' + segments.join('/');
+}
+
+interface ScanContext {
+    /** Route segments (URL-form) leading to the current directory, excluding route groups */
+    routeAncestors: string[];
+    /** When inside an intercepting subtree, the source URL where interception originates */
+    interceptSource?: string;
+}
+
+/**
  * Recursively scans the app directory and builds the route tree
  */
 export function scanAppDirectory(
     dirPath: string,
     extensions: string[] = DEFAULT_EXTENSIONS,
-    parentPath: string = ''
+    parentPath: string = '',
+    ctx: ScanContext = { routeAncestors: [] }
 ): RouteNode[] {
     if (!fs.existsSync(dirPath)) {
         return [];
@@ -126,10 +198,56 @@ export function scanAppDirectory(
         const segmentInfo = parseSegment(entry.name);
         const fullDirPath = path.join(dirPath, entry.name);
 
+        // Entering a new intercepting subtree (only at the top of an intercept chain)
+        if (segmentInfo.interceptLevel !== undefined && !ctx.interceptSource) {
+            // The "parent" path (where this marker dir lives) is the source.
+            const sourcePath = parentPath || '/';
+            // Climb from the parent's route ancestors as required by the marker,
+            // then append this marker dir's own segment to form the target base.
+            const climbed = resolveInterceptBase(ctx.routeAncestors, segmentInfo.interceptLevel);
+            const targetAncestors = segmentInfo.routeSegment
+                ? [...climbed, segmentInfo.routeSegment]
+                : climbed;
+            const targetPath = joinUrlSegments(targetAncestors);
+
+            const childCtx: ScanContext = {
+                routeAncestors: targetAncestors,
+                interceptSource: sourcePath,
+            };
+
+            const node: RouteNode = {
+                segment: entry.name,
+                path: targetPath,
+                isDynamic: segmentInfo.isDynamic,
+                isCatchAll: segmentInfo.isCatchAll,
+                isOptionalCatchAll: segmentInfo.isOptionalCatchAll,
+                isGroup: false,
+                paramName: segmentInfo.paramName,
+                isIntercepting: true,
+                interceptSource: sourcePath,
+                pagePath: findFileWithExtension(fullDirPath, 'page', extensions),
+                // Layouts/loading/etc. inside an intercepting subtree are
+                // intentionally ignored by the current renderer; the intercept
+                // is rendered without target/source layouts (see codeGenerator).
+                loadingPath: findFileWithExtension(fullDirPath, 'loading', extensions),
+                errorPath: findFileWithExtension(fullDirPath, 'error', extensions),
+                children: scanAppDirectory(fullDirPath, extensions, targetPath, childCtx),
+            };
+
+            nodes.push(node);
+            continue;
+        }
+
         // Calculate the route path
         const routePath = segmentInfo.isGroup
             ? parentPath
             : parentPath + (segmentInfo.routeSegment ? `/${segmentInfo.routeSegment}` : '');
+
+        const childAncestors = segmentInfo.isGroup
+            ? ctx.routeAncestors
+            : segmentInfo.routeSegment
+                ? [...ctx.routeAncestors, segmentInfo.routeSegment]
+                : ctx.routeAncestors;
 
         const node: RouteNode = {
             segment: entry.name,
@@ -139,12 +257,17 @@ export function scanAppDirectory(
             isOptionalCatchAll: segmentInfo.isOptionalCatchAll,
             isGroup: segmentInfo.isGroup,
             paramName: segmentInfo.paramName,
+            isIntercepting: ctx.interceptSource !== undefined,
+            interceptSource: ctx.interceptSource,
             pagePath: findFileWithExtension(fullDirPath, 'page', extensions),
             layoutPath: findFileWithExtension(fullDirPath, 'layout', extensions),
             loadingPath: findFileWithExtension(fullDirPath, 'loading', extensions),
             errorPath: findFileWithExtension(fullDirPath, 'error', extensions),
             notFoundPath: findFileWithExtension(fullDirPath, 'not-found', extensions),
-            children: scanAppDirectory(fullDirPath, extensions, routePath),
+            children: scanAppDirectory(fullDirPath, extensions, routePath, {
+                routeAncestors: childAncestors,
+                interceptSource: ctx.interceptSource,
+            }),
         };
 
         nodes.push(node);
@@ -185,15 +308,23 @@ interface ParentContext {
     layoutNotFoundMap: Map<string, string>;
 }
 
+export interface FlattenedRoutes {
+    routes: ParsedRoute[];
+    intercepts: InterceptedRoute[];
+}
+
 /**
- * Flattens the route tree into a list of parsed routes
+ * Flattens the route tree into a list of parsed routes plus intercepts.
+ * Intercepting subtrees are extracted into a separate list so that the
+ * regular route table doesn't contain duplicates at the same URL.
  */
 export function flattenRoutes(
     nodes: RouteNode[],
     parentContext: ParentContext = { layouts: [], layoutNotFoundMap: new Map() },
     rootContext?: { layoutPath?: string; loadingPath?: string; errorPath?: string; notFoundPath?: string }
-): ParsedRoute[] {
+): FlattenedRoutes {
     const routes: ParsedRoute[] = [];
+    const intercepts: InterceptedRoute[] = [];
 
     // Merge root context with parent context
     const context: ParentContext = rootContext
@@ -212,6 +343,15 @@ export function flattenRoutes(
     }
 
     for (const node of nodes) {
+        // Intercepting subtree: collect intercept entries from the page nodes
+        // inside it, keyed by source/target. The source's loading is the only
+        // contextual data we carry; layouts are intentionally not applied to
+        // intercepts (the intercept page is rendered as a leaf overlay).
+        if (node.isIntercepting && node.interceptSource !== undefined) {
+            collectIntercepts(node, node.interceptSource, context.loadingPath, intercepts);
+            continue;
+        }
+
         // Build current context - child values override parent values
         const currentLayoutNotFoundMap = new Map(context.layoutNotFoundMap);
 
@@ -243,11 +383,36 @@ export function flattenRoutes(
 
         // Process children recursively
         if (node.children.length > 0) {
-            routes.push(...flattenRoutes(node.children, currentContext));
+            const childResult = flattenRoutes(node.children, currentContext);
+            routes.push(...childResult.routes);
+            intercepts.push(...childResult.intercepts);
         }
     }
 
-    return routes;
+    return { routes, intercepts };
+}
+
+/**
+ * Walks an intercepting subtree and pushes one InterceptedRoute per page.
+ */
+function collectIntercepts(
+    node: RouteNode,
+    sourcePattern: string,
+    inheritedLoading: string | undefined,
+    out: InterceptedRoute[]
+): void {
+    const loadingPath = node.loadingPath || inheritedLoading;
+    if (node.pagePath) {
+        out.push({
+            sourcePattern,
+            targetPattern: node.path || '/',
+            pagePath: node.pagePath,
+            loadingPath,
+        });
+    }
+    for (const child of node.children) {
+        collectIntercepts(child, sourcePattern, loadingPath, out);
+    }
 }
 
 /**
@@ -282,6 +447,7 @@ export function pathToIdentifier(routePath: string): string {
  */
 export function parseAppRouter(options: PluginOptions = {}): {
     routes: ParsedRoute[];
+    intercepts: InterceptedRoute[];
     tree: RouteNode[];
     rootLayout?: string;
     rootPage?: string;
@@ -292,7 +458,11 @@ export function parseAppRouter(options: PluginOptions = {}): {
 
     const tree = scanAppDirectory(appDir, extensions);
     const root = getRootPage(appDir, extensions);
-    const routes = flattenRoutes(tree, { layouts: [], layoutNotFoundMap: new Map() }, root);
+    const { routes, intercepts } = flattenRoutes(
+        tree,
+        { layouts: [], layoutNotFoundMap: new Map() },
+        root
+    );
 
     // Build the root layoutNotFoundMap
     const rootLayoutNotFoundMap = new Map<string, string>();
@@ -315,6 +485,7 @@ export function parseAppRouter(options: PluginOptions = {}): {
 
     return {
         routes,
+        intercepts,
         tree,
         rootLayout: root.layoutPath,
         rootPage: root.pagePath,

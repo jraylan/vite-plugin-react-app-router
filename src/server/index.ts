@@ -68,14 +68,14 @@ function regenerateRoutes(): string {
         return generateEmptyRoutesCode();
     }
 
-    const { routes, rootNotFound } = parseAppRouter({
+    const { routes, intercepts, rootNotFound } = parseAppRouter({
         ...ctx.options,
         appDir,
     });
 
     // Use lazy loading by default for code splitting (can be disabled via options)
     const lazy = ctx.options.lazy !== false;
-    ctx.cachedCode = generateDevRoutesCode(routes, { rootDir, lazy, rootNotFound });
+    ctx.cachedCode = generateDevRoutesCode(routes, { rootDir, lazy, rootNotFound, intercepts });
     outputDebug(ctx.cachedCode);
     return ctx.cachedCode;
 }

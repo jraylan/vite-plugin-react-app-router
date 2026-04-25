@@ -19,10 +19,8 @@ Um plugin Vite que traz o roteamento baseado em arquivos do **Next.js App Router
 
 ## Limitacoes
 
-- Apenas `page.tsx` e `layout.tsx` sao suportados atualmente
-- `loading.tsx`, `error.tsx` e `not-found.tsx` sao parseados mas ainda nao funcionam
 - Server components nao sao suportados (este e um router client-side)
-- Rotas paralelas e rotas de interceptacao nao estao implementadas
+- Rotas paralelas nao estao implementadas
 
 ## Instalacao
 
@@ -126,6 +124,55 @@ src/app/
 | `[...param]`   | `[...slug]`   | `*` - Catch-all                              |
 | `[[...param]]` | `[[...slug]]` | `*` - Catch-all opcional                     |
 | `(group)`      | `(auth)`      | Route group (nao incluido no caminho da URL) |
+
+## Rotas Interceptadas
+
+Seguindo a [convencao do Next.js](https://nextjs.org/docs/app/api-reference/file-conventions/intercepting-routes), um diretorio cujo nome comeca com `(.)`, `(..)`, `(..)(..)` ou `(...)` define uma rota que e renderizada **no lugar de** outra rota quando a navegacao parte do segmento de origem. Navegacao direta (barra de URL, refresh) renderiza a pagina canonica; navegacao "soft" que opte por interceptar (veja abaixo) renderiza a pagina interceptante.
+
+| Marker      | Significa                              |
+| ----------- | -------------------------------------- |
+| `(.)`       | Mesmo nivel do pai do marker           |
+| `(..)`      | Um segmento de rota acima              |
+| `(..)(..)`  | Dois segmentos de rota acima           |
+| `(...)`     | A raiz `app`                           |
+
+A convencao e baseada em **segmentos de rota**, entao diretorios `(group)` nao contam para a contagem de subida.
+
+### Exemplo
+
+```
+src/app/
+├── feed/
+│   ├── (..)photo/[id]/
+│   │   └── page.tsx       # intercepta /photo/:id quando vem de /feed
+│   └── page.tsx           # /feed
+└── photo/[id]/
+    └── page.tsx           # /photo/:id (canonica)
+```
+
+Para acionar uma navegacao interceptada, defina `state.appRouterBackgroundLocation` em um `<Link>`:
+
+```tsx
+import { Link, useLocation } from "react-router-dom";
+
+export default function FeedItem({ id }: { id: string }) {
+  const location = useLocation();
+  return (
+    <Link to={`/photo/${id}`} state={{ appRouterBackgroundLocation: location }}>
+      Abrir foto
+    </Link>
+  );
+}
+```
+
+Quando `appRouterBackgroundLocation` esta definido e bate com o source de uma rota interceptada, a pagina interceptante e renderizada na URL de destino. Em refresh ou visita direta, a pagina canonica e renderizada.
+
+### Notas
+
+- A rota interceptada exige uma pagina canonica irma na URL de destino. Sem ela, o plugin emite um warning em build/dev e ignora a interceptacao.
+- A pagina interceptante substitui a pagina canonica (sem slot paralelo). Se quiser manter a pagina origem visivel atras de um modal, renderize o modal voce mesmo com um portal — `useLocation().state?.appRouterBackgroundLocation` indica de onde o usuario veio.
+- Hard refresh (F5) renderiza a pagina canonica. O plugin remove `appRouterBackgroundLocation` do `history.state` quando `performance.navigation.type === 'reload'`, entao a interceptacao so dispara em navegacao soft (via Link), igual ao Next.js. Back/forward reaplica a interceptacao porque o estado e preservado nessas entradas.
+- `loading.tsx` dentro de uma subarvore interceptante e respeitado como fallback de Suspense da pagina interceptante.
 
 ## Exportacoes
 

@@ -7,8 +7,13 @@
 
 import * as t from '@babel/types';
 import _generate from '@babel/generator';
-import type { ParsedRoute } from './types.js';
+import type { ParsedRoute, InterceptedRoute } from './types.js';
 import { pathToIdentifier } from './routeParser.js';
+
+/** State key on history.state used to signal an intercepted navigation. */
+const BACKGROUND_LOCATION_KEY = 'appRouterBackgroundLocation';
+/** Internal name for the resolver function in the generated module. */
+const INTERCEPT_RESOLVER_NAME = '__appRouterInterceptResolver__';
 
 // Handle both ESM and CJS default exports
 const generate = typeof _generate === 'function' ? _generate : (_generate as { default: typeof _generate }).default;
@@ -147,6 +152,8 @@ interface CollectedImports {
     loadingMap: Map<string, string>;
     errorMap: Map<string, string>;
     notFoundMap: Map<string, string>;
+    /** Map of intercept page path → component name */
+    interceptMap: Map<string, string>;
 }
 
 /**
@@ -156,7 +163,8 @@ function collectImports(
     routes: ParsedRoute[],
     rootDir: string,
     lazy: boolean,
-    rootNotFound?: string
+    rootNotFound?: string,
+    intercepts: InterceptedRoute[] = []
 ): CollectedImports {
     const statements: t.Statement[] = [];
     const componentMap = new Map<string, string>();
@@ -164,28 +172,33 @@ function collectImports(
     const loadingMap = new Map<string, string>();
     const errorMap = new Map<string, string>();
     const notFoundMap = new Map<string, string>();
+    const interceptMap = new Map<string, string>();
 
     let pageIndex = 0;
     let layoutIndex = 0;
     let loadingIndex = 0;
     let errorIndex = 0;
     let notFoundIndex = 0;
+    let interceptIndex = 0;
     const seenLayouts = new Set<string>();
     const seenLoading = new Set<string>();
     const seenError = new Set<string>();
     const seenNotFound = new Set<string>();
+    const seenIntercepts = new Set<string>();
 
-    // Import from react-router-dom
-    statements.push(
-        createImportDeclaration(
-            [
-                createNamedImport('createBrowserRouter'),
-                createNamedImport('RouterProvider'),
-                createNamedImport('Outlet'),
-            ],
-            'react-router-dom'
-        )
-    );
+    const hasIntercepts = intercepts.length > 0;
+
+    // Import from react-router-dom (add useLocation/matchPath when intercepts exist)
+    const rrSpecifiers: t.ImportSpecifier[] = [
+        createNamedImport('createBrowserRouter'),
+        createNamedImport('RouterProvider'),
+        createNamedImport('Outlet'),
+    ];
+    if (hasIntercepts) {
+        rrSpecifiers.push(createNamedImport('useLocation'));
+        rrSpecifiers.push(createNamedImport('matchPath'));
+    }
+    statements.push(createImportDeclaration(rrSpecifiers, 'react-router-dom'));
 
     // Import from react
     const reactImports: t.ImportSpecifier[] = [
@@ -318,7 +331,203 @@ function collectImports(
         notFoundMap.set(rootNotFound, notFoundName);
     }
 
-    return { statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap };
+    // Import intercept page components
+    for (const ic of intercepts) {
+        if (seenIntercepts.has(ic.pagePath)) continue;
+        seenIntercepts.add(ic.pagePath);
+        const name = `Intercept${interceptIndex++}`;
+        const importPath = normalizeImportPath(ic.pagePath, rootDir);
+        if (lazy) {
+            statements.push(createLazyImport(name, importPath));
+        } else {
+            statements.push(
+                createImportDeclaration([createDefaultImport(name)], `/${importPath}`)
+            );
+        }
+        interceptMap.set(ic.pagePath, name);
+
+        // Source loading components ride on top of regular loading imports.
+        if (ic.loadingPath && !seenLoading.has(ic.loadingPath)) {
+            seenLoading.add(ic.loadingPath);
+            const loadingName = `Loading${loadingIndex++}`;
+            const loadingImportPath = normalizeImportPath(ic.loadingPath, rootDir);
+            if (lazy) {
+                statements.push(createLazyImport(loadingName, loadingImportPath));
+            } else {
+                statements.push(
+                    createImportDeclaration([createDefaultImport(loadingName)], `/${loadingImportPath}`)
+                );
+            }
+            loadingMap.set(ic.loadingPath, loadingName);
+        }
+    }
+
+    return { statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap, interceptMap };
+}
+
+/**
+ * Builds the AST for the intercept resolver function:
+ *
+ *   function __appRouterInterceptResolver__({ regular, intercepts }) {
+ *       const location = useLocation();
+ *       const state = location.state;
+ *       const bg = state && state.appRouterBackgroundLocation;
+ *       if (bg && bg.pathname && intercepts) {
+ *           for (let i = 0; i < intercepts.length; i++) {
+ *               const ic = intercepts[i];
+ *               if (matchPath({ path: ic.source, end: false }, bg.pathname)) {
+ *                   return ic.element;
+ *               }
+ *           }
+ *       }
+ *       return regular;
+ *   }
+ */
+function createInterceptResolverDeclaration(): t.FunctionDeclaration {
+    const propsParam = t.objectPattern([
+        t.objectProperty(t.identifier('regular'), t.identifier('regular'), false, true),
+        t.objectProperty(t.identifier('intercepts'), t.identifier('intercepts'), false, true),
+    ]);
+
+    const locationDecl = t.variableDeclaration('const', [
+        t.variableDeclarator(
+            t.identifier('location'),
+            t.callExpression(t.identifier('useLocation'), [])
+        ),
+    ]);
+
+    const stateDecl = t.variableDeclaration('const', [
+        t.variableDeclarator(
+            t.identifier('state'),
+            t.memberExpression(t.identifier('location'), t.identifier('state'))
+        ),
+    ]);
+
+    const bgDecl = t.variableDeclaration('const', [
+        t.variableDeclarator(
+            t.identifier('bg'),
+            t.logicalExpression(
+                '&&',
+                t.identifier('state'),
+                t.memberExpression(t.identifier('state'), t.identifier(BACKGROUND_LOCATION_KEY))
+            )
+        ),
+    ]);
+
+    // matchPath({ path: ic.source, end: false }, bg.pathname)
+    const matchCall = t.callExpression(t.identifier('matchPath'), [
+        t.objectExpression([
+            t.objectProperty(
+                t.identifier('path'),
+                t.memberExpression(t.identifier('ic'), t.identifier('source'))
+            ),
+            t.objectProperty(t.identifier('end'), t.booleanLiteral(false)),
+        ]),
+        t.memberExpression(t.identifier('bg'), t.identifier('pathname')),
+    ]);
+
+    const loopBody = t.blockStatement([
+        t.variableDeclaration('const', [
+            t.variableDeclarator(
+                t.identifier('ic'),
+                t.memberExpression(
+                    t.identifier('intercepts'),
+                    t.identifier('i'),
+                    true
+                )
+            ),
+        ]),
+        t.ifStatement(
+            matchCall,
+            t.blockStatement([
+                t.returnStatement(
+                    t.memberExpression(t.identifier('ic'), t.identifier('element'))
+                ),
+            ])
+        ),
+    ]);
+
+    const forStmt = t.forStatement(
+        t.variableDeclaration('let', [
+            t.variableDeclarator(t.identifier('i'), t.numericLiteral(0)),
+        ]),
+        t.binaryExpression(
+            '<',
+            t.identifier('i'),
+            t.memberExpression(t.identifier('intercepts'), t.identifier('length'))
+        ),
+        t.updateExpression('++', t.identifier('i')),
+        loopBody
+    );
+
+    const guard = t.ifStatement(
+        t.logicalExpression(
+            '&&',
+            t.logicalExpression(
+                '&&',
+                t.identifier('bg'),
+                t.memberExpression(t.identifier('bg'), t.identifier('pathname'))
+            ),
+            t.identifier('intercepts')
+        ),
+        t.blockStatement([forStmt])
+    );
+
+    const body = t.blockStatement([
+        locationDecl,
+        stateDecl,
+        bgDecl,
+        guard,
+        t.returnStatement(t.identifier('regular')),
+    ]);
+
+    return t.functionDeclaration(
+        t.identifier(INTERCEPT_RESOLVER_NAME),
+        [propsParam],
+        body
+    );
+}
+
+/**
+ * Wraps a route element in the intercept resolver:
+ *
+ *   createElement(__appRouterInterceptResolver__, {
+ *       regular: <regular element>,
+ *       intercepts: [
+ *           { source: '/feed', element: createElement(InterceptN) },
+ *           ...
+ *       ]
+ *   })
+ */
+function wrapWithInterceptResolver(
+    regularElement: t.Expression,
+    targetIntercepts: InterceptedRoute[],
+    interceptMap: Map<string, string>,
+    loadingMap: Map<string, string>,
+    lazy: boolean
+): t.CallExpression {
+    const interceptObjects = targetIntercepts.map((ic) => {
+        const componentName = interceptMap.get(ic.pagePath)!;
+        const loadingName = ic.loadingPath ? loadingMap.get(ic.loadingPath) : undefined;
+        return t.objectExpression([
+            t.objectProperty(t.identifier('source'), t.stringLiteral(ic.sourcePattern)),
+            t.objectProperty(
+                t.identifier('element'),
+                createSuspenseWrapper(componentName, lazy, loadingName)
+            ),
+        ]);
+    });
+
+    return t.callExpression(t.identifier('createElement'), [
+        t.identifier(INTERCEPT_RESOLVER_NAME),
+        t.objectExpression([
+            t.objectProperty(t.identifier('regular'), regularElement),
+            t.objectProperty(
+                t.identifier('intercepts'),
+                t.arrayExpression(interceptObjects)
+            ),
+        ]),
+    ]);
 }
 
 /**
@@ -331,6 +540,8 @@ function buildRouteExpression(
     loadingMap: Map<string, string>,
     errorMap: Map<string, string>,
     notFoundMap: Map<string, string>,
+    interceptMap: Map<string, string>,
+    interceptsByTarget: Map<string, InterceptedRoute[]>,
     lazy: boolean
 ): t.ObjectExpression {
     const pageName = componentMap.get(route.pagePath)!;
@@ -341,7 +552,19 @@ function buildRouteExpression(
     const loadingName = route.loadingPath ? loadingMap.get(route.loadingPath) : undefined;
     const errorName = route.errorPath ? errorMap.get(route.errorPath) : undefined;
 
-    const pageElement = createSuspenseWrapper(pageName, lazy, loadingName);
+    let pageElement: t.Expression = createSuspenseWrapper(pageName, lazy, loadingName);
+
+    // If this target has any intercepts, wrap the element in the resolver.
+    const targetIntercepts = interceptsByTarget.get(route.pattern);
+    if (targetIntercepts && targetIntercepts.length > 0) {
+        pageElement = wrapWithInterceptResolver(
+            pageElement,
+            targetIntercepts,
+            interceptMap,
+            loadingMap,
+            lazy
+        );
+    }
 
     // Build the base route properties
     const buildRouteProps = (props: t.ObjectProperty[]): t.ObjectExpression => {
@@ -423,6 +646,8 @@ export interface CodeGeneratorOptions {
     lazy?: boolean;
     /** Root not-found component path */
     rootNotFound?: string;
+    /** Intercepting routes (Next.js (.) / (..) / (...) convention) */
+    intercepts?: InterceptedRoute[];
 }
 
 /**
@@ -432,13 +657,43 @@ function generateRoutesAST(
     routes: ParsedRoute[],
     options: CodeGeneratorOptions
 ): t.Program {
-    const { rootDir, lazy = true, rootNotFound } = options;
+    const { rootDir, lazy = true, rootNotFound, intercepts = [] } = options;
 
     if (routes.length === 0) {
         return generateEmptyRoutesAST();
     }
 
-    const { statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap } = collectImports(routes, rootDir, lazy, rootNotFound);
+    // Drop intercepts whose target route doesn't exist — without a regular sibling
+    // route there is no element to wrap, and the URL would not be reachable at all
+    // with the current renderer (a future iteration could synthesize a standalone
+    // route, but that hides the misconfiguration from the developer).
+    const targetPatterns = new Set(routes.map((r) => r.pattern));
+    const usableIntercepts: InterceptedRoute[] = [];
+    for (const ic of intercepts) {
+        if (targetPatterns.has(ic.targetPattern)) {
+            usableIntercepts.push(ic);
+        } else {
+            console.warn(
+                `[vite-plugin-react-app-router] intercepting route at "${ic.pagePath}" ` +
+                `targets "${ic.targetPattern}" but no regular page exists for that path; ` +
+                `skipping interception. Create a page.tsx at that route to enable it.`
+            );
+        }
+    }
+
+    const interceptsByTarget = new Map<string, InterceptedRoute[]>();
+    for (const ic of usableIntercepts) {
+        const list = interceptsByTarget.get(ic.targetPattern) || [];
+        list.push(ic);
+        interceptsByTarget.set(ic.targetPattern, list);
+    }
+
+    const { statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap, interceptMap } =
+        collectImports(routes, rootDir, lazy, rootNotFound, usableIntercepts);
+
+    if (usableIntercepts.length > 0) {
+        statements.push(createInterceptResolverDeclaration());
+    }
 
     // Group routes by root layout
     const routesByRootLayout = new Map<string, ParsedRoute[]>();
@@ -477,7 +732,17 @@ function generateRoutesAST(
         const rootErrorName = rootContext.errorPath ? errorMap.get(rootContext.errorPath) : undefined;
 
         const childRoutes = layoutRoutes.map((route) =>
-            buildRouteExpression(route, componentMap, layoutMap, loadingMap, errorMap, notFoundMap, lazy)
+            buildRouteExpression(
+                route,
+                componentMap,
+                layoutMap,
+                loadingMap,
+                errorMap,
+                notFoundMap,
+                interceptMap,
+                interceptsByTarget,
+                lazy
+            )
         );
 
         const rootRouteProps: t.ObjectProperty[] = [
@@ -502,9 +767,21 @@ function generateRoutesAST(
         const loadingName = route.loadingPath ? loadingMap.get(route.loadingPath) : undefined;
         const errorName = route.errorPath ? errorMap.get(route.errorPath) : undefined;
 
+        let pageElement: t.Expression = createSuspenseWrapper(pageName, lazy, loadingName);
+        const targetIntercepts = interceptsByTarget.get(route.pattern);
+        if (targetIntercepts && targetIntercepts.length > 0) {
+            pageElement = wrapWithInterceptResolver(
+                pageElement,
+                targetIntercepts,
+                interceptMap,
+                loadingMap,
+                lazy
+            );
+        }
+
         const routeProps: t.ObjectProperty[] = [
             createRouteProperty('path', t.stringLiteral(route.pattern)),
-            createRouteProperty('element', createSuspenseWrapper(pageName, lazy, loadingName)),
+            createRouteProperty('element', pageElement),
         ];
 
         if (errorName) {
@@ -636,6 +913,56 @@ function generateEmptyRoutesAST(): t.Program {
 }
 
 /**
+ * Snippet that runs once at module load. Browsers preserve `history.state`
+ * across hard refreshes, which would otherwise cause our resolver to keep
+ * showing the intercepting page after F5. We strip the marker so the
+ * canonical page renders instead — matching Next.js behavior.
+ *
+ * Must execute *before* `createBrowserRouter` reads the history state.
+ */
+const HARD_REFRESH_FIX_SNIPPET = `
+// vite-plugin-react-app-router: drop appRouterBackgroundLocation on hard refresh
+if (typeof window !== "undefined" && typeof performance !== "undefined") {
+  try {
+    var __vparr_nav__ = performance.getEntriesByType("navigation")[0];
+    if (__vparr_nav__ && __vparr_nav__.type === "reload") {
+      var __vparr_hist__ = window.history.state;
+      var __vparr_usr__ = __vparr_hist__ && __vparr_hist__.usr;
+      if (__vparr_usr__ && __vparr_usr__.appRouterBackgroundLocation) {
+        var __vparr_nu__ = Object.assign({}, __vparr_usr__);
+        delete __vparr_nu__.appRouterBackgroundLocation;
+        window.history.replaceState(
+          Object.assign({}, __vparr_hist__, { usr: __vparr_nu__ }),
+          "",
+          window.location.pathname + window.location.search + window.location.hash
+        );
+      }
+    }
+  } catch (__vparr_err__) {}
+}
+`;
+
+/**
+ * Inserts a raw code snippet right after the last `import ... from "..."`
+ * statement so it runs as early as possible at module load.
+ */
+function injectAfterImports(code: string, snippet: string): string {
+    const lines = code.split('\n');
+    let lastImportIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+        if (/^import\b/.test(lines[i]!.trim())) {
+            lastImportIdx = i;
+        }
+    }
+    if (lastImportIdx === -1) {
+        return snippet.trimStart() + '\n' + code;
+    }
+    const before = lines.slice(0, lastImportIdx + 1).join('\n');
+    const after = lines.slice(lastImportIdx + 1).join('\n');
+    return before + '\n' + snippet + (after.startsWith('\n') ? '' : '\n') + after;
+}
+
+/**
  * Generates the complete routes module code using AST
  */
 export function generateRoutesCode(
@@ -647,7 +974,11 @@ export function generateRoutesCode(
         comments: true,
         compact: false,
     });
-    return output.code;
+    let code = output.code;
+    if ((options.intercepts || []).length > 0) {
+        code = injectAfterImports(code, HARD_REFRESH_FIX_SNIPPET);
+    }
+    return code;
 }
 
 /**

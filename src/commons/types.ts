@@ -33,6 +33,10 @@ export interface RouteNode {
     paramName?: string;
     /** Is a route group? (group) */
     isGroup: boolean;
+    /** True if this node lives inside an intercepting subtree */
+    isIntercepting?: boolean;
+    /** URL pattern of the source (parent of the intercepting marker) */
+    interceptSource?: string;
 }
 
 export interface ParsedRoute {
@@ -50,6 +54,21 @@ export interface ParsedRoute {
     notFoundPath?: string;
     /** Map of layout path to its specific not-found component (for nested not-found support) */
     layoutNotFoundMap?: Map<string, string>;
+}
+
+/**
+ * A route that intercepts another route when navigating from a specific source.
+ * Mirrors Next.js App Router intercepting routes (`(.)`, `(..)`, `(..)(..)`, `(...)`).
+ */
+export interface InterceptedRoute {
+    /** URL pattern for the source where interception originates (e.g., "/feed") */
+    sourcePattern: string;
+    /** URL pattern for the route being intercepted (e.g., "/photo/:id") */
+    targetPattern: string;
+    /** Path to the page.tsx of the intercepting route */
+    pagePath: string;
+    /** Loading component inherited from the source's tree (used for Suspense fallback) */
+    loadingPath?: string;
 }
 
 export interface PluginOptions {

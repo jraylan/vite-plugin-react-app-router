@@ -20,7 +20,7 @@ A Vite plugin that brings **Next.js App Router** file-based routing to standard 
 ## Limitations
 
 - Server components are not supported (this is a client-side router)
-- Parallel routes and intercepting routes are not implemented
+- Parallel routes are not implemented
 
 ## Installation
 
@@ -124,6 +124,55 @@ src/app/
 | `[...param]`   | `[...slug]`   | `*` - Catch-all                        |
 | `[[...param]]` | `[[...slug]]` | `*` - Optional catch-all               |
 | `(group)`      | `(auth)`      | Route group (not included in URL path) |
+
+## Intercepting Routes
+
+Following the [Next.js convention](https://nextjs.org/docs/app/api-reference/file-conventions/intercepting-routes), a directory whose name starts with `(.)`, `(..)`, `(..)(..)`, or `(...)` defines a route that is rendered **in place of** another route when navigation originates from the source segment. Direct navigation (URL bar, refresh) renders the regular page; soft navigation that opts in (see below) renders the intercepting page.
+
+| Marker      | Means                                  |
+| ----------- | -------------------------------------- |
+| `(.)`       | Same level as the marker's parent      |
+| `(..)`      | One route segment above                |
+| `(..)(..)`  | Two route segments above               |
+| `(...)`     | The `app` root                         |
+
+The convention is based on **route segments**, so `(group)` directories don't count toward climbing.
+
+### Example
+
+```
+src/app/
+├── feed/
+│   ├── (..)photo/[id]/
+│   │   └── page.tsx       # intercepts /photo/:id when coming from /feed
+│   └── page.tsx           # /feed
+└── photo/[id]/
+    └── page.tsx           # /photo/:id (canonical)
+```
+
+Trigger an intercepted navigation by setting `state.appRouterBackgroundLocation` on a `<Link>`:
+
+```tsx
+import { Link, useLocation } from "react-router-dom";
+
+export default function FeedItem({ id }: { id: string }) {
+  const location = useLocation();
+  return (
+    <Link to={`/photo/${id}`} state={{ appRouterBackgroundLocation: location }}>
+      Open photo
+    </Link>
+  );
+}
+```
+
+When `appRouterBackgroundLocation` is set and matches an intercepting route's source pattern, the intercepting page is rendered at the target URL. On reload or direct visit, the canonical page is rendered instead.
+
+### Notes
+
+- The intercepting route requires a regular sibling page at the target URL. If the target doesn't exist, the plugin emits a warning at build/dev time and the intercept is ignored.
+- Intercepting pages render **in place of** the target page (no parallel slot). If you want the source page to remain visible behind a modal, render the modal yourself with a portal — `useLocation().state?.appRouterBackgroundLocation` tells you which page the user came from.
+- Hard refresh (F5) renders the canonical page. The plugin strips `appRouterBackgroundLocation` from `history.state` on `performance.navigation.type === 'reload'`, so the intercept fires only on soft (link-driven) navigation, mirroring Next.js. Back/forward still re-applies the intercept since the state is preserved on those entries.
+- `loading.tsx` inside an intercepting subtree is honored as the Suspense fallback for the intercepting page.
 
 ## Exports
 
