@@ -10,6 +10,9 @@
     "type": "git",
     "url": "git+https://github.com/jraylan/vite-plugin-react-app-router.git"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",
