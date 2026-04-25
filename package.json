@@ -36,7 +36,7 @@
   },
   "files": [
     "dist",
-    "scripts"
+    "scripts/postinstall.mjs"
   ],
   "scripts": {
     "build": "tsc",
