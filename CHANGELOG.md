@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.11](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.10...v0.1.11) (2026-04-25)
+
+
+### Bug Fixes
+
+* fix error pages to properly respect the router tree ([f54ea7b](https://github.com/jraylan/vite-plugin-react-app-router/commit/f54ea7b77b92ba79082a87f96545c8ff080f009c))
+
 ## [0.1.10](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.9...v0.1.10) (2026-04-25)
 
 
