@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.7...v0.1.8) (2026-04-25)
+
+
+### Miscellaneous Chores
+
+* manual version bump ([6b98a66](https://github.com/jraylan/vite-plugin-react-app-router/commit/6b98a66db9b2b905748042f7085252db5a2f4dc3))
+
 ## [0.1.7](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.6...v0.1.7) (2026-04-25)
 
 
