@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.8...v0.1.9) (2026-04-25)
+
+
+### Features
+
+* add support to router interception ([69a4de1](https://github.com/jraylan/vite-plugin-react-app-router/commit/69a4de1e58907fdbb5fdb8bcdbbc0b02cc73c450))
+
 ## [0.1.8](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.7...v0.1.8) (2026-04-25)
 
 
