@@ -65,14 +65,24 @@ function generateRoutes(): string {
         return generateEmptyRoutesCode();
     }
 
-    const { routes, intercepts, rootNotFound } = parseAppRouter({
+    const parsed = parseAppRouter({
         ...ctx.options,
         appDir,
     });
 
     // Use lazy loading by default for code splitting (can be disabled via options)
     const lazy = ctx.options.lazy !== false;
-    ctx.generatedCode = generateBuildRoutesCode(routes, { rootDir, lazy, rootNotFound, intercepts });
+    ctx.generatedCode = generateBuildRoutesCode(parsed.routes, {
+        rootDir,
+        lazy,
+        rootNotFound: parsed.rootNotFound,
+        intercepts: parsed.intercepts,
+        tree: parsed.tree,
+        rootLayout: parsed.rootLayout,
+        rootPage: parsed.rootPage,
+        rootError: parsed.rootError,
+        rootLoading: parsed.rootLoading,
+    });
     outputDebug(ctx.generatedCode);
     return ctx.generatedCode;
 }

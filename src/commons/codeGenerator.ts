@@ -7,7 +7,7 @@
 
 import * as t from '@babel/types';
 import _generate from '@babel/generator';
-import type { ParsedRoute, InterceptedRoute } from './types.js';
+import type { ParsedRoute, InterceptedRoute, RouteNode } from './types.js';
 import { pathToIdentifier } from './routeParser.js';
 
 /** State key on history.state used to signal an intercepted navigation. */
@@ -648,6 +648,372 @@ export interface CodeGeneratorOptions {
     rootNotFound?: string;
     /** Intercepting routes (Next.js (.) / (..) / (...) convention) */
     intercepts?: InterceptedRoute[];
+    /**
+     * The full route tree (children of the app dir). When supplied, the
+     * generator builds the route definitions recursively so that error and
+     * not-found boundaries land at the segment where they were declared,
+     * matching Next.js semantics. Falls back to the legacy flat layout when
+     * omitted (kept for backward compatibility).
+     */
+    tree?: RouteNode[];
+    /** Root layout absolute path */
+    rootLayout?: string;
+    /** Root page absolute path */
+    rootPage?: string;
+    /** Root error.tsx absolute path */
+    rootError?: string;
+    /** Root loading.tsx absolute path */
+    rootLoading?: string;
+}
+
+/**
+ * Builder context shared across recursive calls to buildSubtree.
+ */
+interface BuilderCtx {
+    componentMap: Map<string, string>;
+    layoutMap: Map<string, string>;
+    loadingMap: Map<string, string>;
+    errorMap: Map<string, string>;
+    notFoundMap: Map<string, string>;
+    interceptMap: Map<string, string>;
+    interceptsByTarget: Map<string, InterceptedRoute[]>;
+    lazy: boolean;
+}
+
+/**
+ * Resolves the loading component name to use for a node, walking up the
+ * inherited loading chain.
+ */
+function pickLoading(
+    nodeLoading: string | undefined,
+    inheritedLoading: string | undefined,
+    ctx: BuilderCtx
+): string | undefined {
+    const path = nodeLoading || inheritedLoading;
+    return path ? ctx.loadingMap.get(path) : undefined;
+}
+
+/**
+ * Builds the page route node for a given segment. Pattern is taken from
+ * `node.path`, which is already absolute-relative-to-root (e.g. "dashboard/x").
+ *
+ * When the page sits inside a layout we emit `index: true` for the segment
+ * that shares the layout's URL — this is the canonical react-router way to
+ * mark "this is the default child of the layout". Without a wrapping layout
+ * we fall back to an explicit `path: '/'` (or the original pattern).
+ */
+function makePageNode(
+    node: { path: string; pagePath: string },
+    inheritedLoading: string | undefined,
+    ctx: BuilderCtx,
+    insideLayout: boolean
+): t.ObjectExpression {
+    const pageName = ctx.componentMap.get(node.pagePath)!;
+    const loadingName = pickLoading(undefined, inheritedLoading, ctx);
+    const isRootPath = node.path === '/' || node.path === '';
+    const useIndex = insideLayout && isRootPath;
+    const path = isRootPath ? '/' : node.path.replace(/^\//, '');
+
+    let pageElement: t.Expression = createSuspenseWrapper(pageName, ctx.lazy, loadingName);
+    const targetIntercepts = ctx.interceptsByTarget.get(node.path);
+    if (targetIntercepts && targetIntercepts.length > 0) {
+        pageElement = wrapWithInterceptResolver(
+            pageElement,
+            targetIntercepts,
+            ctx.interceptMap,
+            ctx.loadingMap,
+            ctx.lazy
+        );
+    }
+
+    if (useIndex) {
+        return createRouteObject([
+            createRouteProperty('index', true),
+            createRouteProperty('element', pageElement),
+        ]);
+    }
+    return createRouteObject([
+        createRouteProperty('path', t.stringLiteral(path)),
+        createRouteProperty('element', pageElement),
+    ]);
+}
+
+/**
+ * Wraps a list of children in an Outlet with `errorElement`, so the error
+ * boundary captures errors thrown anywhere underneath while renderering at
+ * the parent layout's <Outlet/>. Mirrors Next.js's per-segment error.tsx
+ * boundary, which is nested *inside* the layout of the same segment.
+ */
+function makeErrorWrapper(
+    errorPath: string,
+    children: t.ObjectExpression[],
+    ctx: BuilderCtx
+): t.ObjectExpression {
+    const errorName = ctx.errorMap.get(errorPath)!;
+    return createRouteObject([
+        createRouteProperty(
+            'element',
+            createCreateElementCallExpression('Outlet', t.nullLiteral(), [])
+        ),
+        createRouteProperty(
+            'errorElement',
+            createCreateElementCallExpression(errorName, t.nullLiteral(), [])
+        ),
+        createRouteProperty('children', t.arrayExpression(children)),
+    ]);
+}
+
+/**
+ * Wraps a list of children in a layout node. Root layout gets `path: '/'`.
+ */
+function makeLayoutNode(
+    layoutPath: string,
+    inheritedLoading: string | undefined,
+    children: t.ObjectExpression[],
+    ctx: BuilderCtx,
+    isRoot: boolean
+): t.ObjectExpression {
+    const layoutName = ctx.layoutMap.get(layoutPath)!;
+    const loadingName = pickLoading(undefined, inheritedLoading, ctx);
+    const props: t.ObjectProperty[] = [];
+    if (isRoot) {
+        props.push(createRouteProperty('path', t.stringLiteral('/')));
+    }
+    props.push(
+        createRouteProperty('element', createSuspenseWrapper(layoutName, ctx.lazy, loadingName))
+    );
+    props.push(createRouteProperty('children', t.arrayExpression(children)));
+    return createRouteObject(props);
+}
+
+/**
+ * Recursively builds the react-router children for a single RouteNode.
+ *
+ * Each segment may contribute (in this order, when present):
+ *   1. A page node (its own page.tsx).
+ *   2. Subtrees from descendant segments.
+ *   3. A catch-all not-found node when this segment pairs `layout.tsx` with
+ *      `not-found.tsx`.
+ *
+ * If the segment has its own error.tsx, the accumulated children are wrapped
+ * in an Outlet+errorElement boundary so the boundary lands inside the layout
+ * of the same segment (matching Next.js).
+ *
+ * If the segment has its own layout.tsx, the result becomes a single layout
+ * node; otherwise the children are returned as a flat list to be spread in
+ * the parent.
+ */
+function buildSubtree(
+    node: RouteNode,
+    inheritedLoading: string | undefined,
+    ctx: BuilderCtx,
+    isRoot: boolean = false,
+    insideLayout: boolean = false
+): t.ObjectExpression[] {
+    // Intercepting subtrees are handled separately via interceptsByTarget;
+    // they do not contribute to the regular route table.
+    if (node.isIntercepting) return [];
+
+    const localLoading = node.loadingPath || inheritedLoading;
+
+    // Anything we emit as a child of `node` is, in the final react-router
+    // tree, inside a layout iff `node` itself wraps in one OR we already are
+    // inside an ancestor's layout.
+    const childrenInsideLayout = insideLayout || !!node.layoutPath;
+
+    const inner: t.ObjectExpression[] = [];
+
+    if (node.pagePath) {
+        inner.push(
+            makePageNode(
+                { path: node.path, pagePath: node.pagePath },
+                localLoading,
+                ctx,
+                childrenInsideLayout
+            )
+        );
+    }
+
+    // Route groups don't contribute their own segment but still emit pages.
+    // Their children iterate normally below.
+    for (const child of node.children) {
+        inner.push(...buildSubtree(child, localLoading, ctx, false, childrenInsideLayout));
+    }
+
+    // not-found catch-all paired with this segment's layout
+    if (node.layoutPath && node.notFoundPath) {
+        const notFoundName = ctx.notFoundMap.get(node.notFoundPath);
+        if (notFoundName) {
+            inner.push(
+                createRouteObject([
+                    createRouteProperty('path', t.stringLiteral('*')),
+                    createRouteProperty(
+                        'element',
+                        createSuspenseWrapper(notFoundName, ctx.lazy)
+                    ),
+                ])
+            );
+        }
+    }
+
+    let wrapped: t.ObjectExpression[] = inner;
+
+    // error.tsx of this segment wraps everything underneath, but is itself
+    // rendered *inside* the layout of the same segment.
+    if (node.errorPath) {
+        wrapped = [makeErrorWrapper(node.errorPath, wrapped, ctx)];
+    }
+
+    if (node.layoutPath) {
+        return [makeLayoutNode(node.layoutPath, inheritedLoading, wrapped, ctx, isRoot)];
+    }
+
+    // No layout: pass children up. The error wrapper (if any) becomes a
+    // pathless sibling at the parent level, capturing only the routes from
+    // this subtree.
+    return wrapped;
+}
+
+/**
+ * Walks the tree (plus root info) collecting absolute paths that must be
+ * imported as components.
+ */
+interface CollectedPaths {
+    pages: string[];
+    layouts: string[];
+    loadings: string[];
+    errors: string[];
+    notFounds: string[];
+}
+
+function collectPathsFromTree(
+    tree: RouteNode[],
+    rootInfo: { layoutPath?: string; pagePath?: string; loadingPath?: string; errorPath?: string; notFoundPath?: string }
+): CollectedPaths {
+    const pages: string[] = [];
+    const layouts: string[] = [];
+    const loadings: string[] = [];
+    const errors: string[] = [];
+    const notFounds: string[] = [];
+
+    if (rootInfo.pagePath) pages.push(rootInfo.pagePath);
+    if (rootInfo.layoutPath) layouts.push(rootInfo.layoutPath);
+    if (rootInfo.loadingPath) loadings.push(rootInfo.loadingPath);
+    if (rootInfo.errorPath) errors.push(rootInfo.errorPath);
+    if (rootInfo.notFoundPath) notFounds.push(rootInfo.notFoundPath);
+
+    function walk(node: RouteNode): void {
+        if (node.isIntercepting) return;
+        if (node.pagePath) pages.push(node.pagePath);
+        if (node.layoutPath) layouts.push(node.layoutPath);
+        if (node.loadingPath) loadings.push(node.loadingPath);
+        if (node.errorPath) errors.push(node.errorPath);
+        if (node.notFoundPath) notFounds.push(node.notFoundPath);
+        for (const c of node.children) walk(c);
+    }
+    for (const n of tree) walk(n);
+
+    return { pages, layouts, loadings, errors, notFounds };
+}
+
+/**
+ * Builds the import statements + maps from a path-collection. Used by the
+ * tree-based code path (the legacy route-based path keeps using `collectImports`).
+ */
+function collectImportsFromPaths(
+    paths: CollectedPaths,
+    rootDir: string,
+    lazy: boolean,
+    intercepts: InterceptedRoute[]
+): {
+    statements: t.Statement[];
+    componentMap: Map<string, string>;
+    layoutMap: Map<string, string>;
+    loadingMap: Map<string, string>;
+    errorMap: Map<string, string>;
+    notFoundMap: Map<string, string>;
+    interceptMap: Map<string, string>;
+} {
+    const statements: t.Statement[] = [];
+    const componentMap = new Map<string, string>();
+    const layoutMap = new Map<string, string>();
+    const loadingMap = new Map<string, string>();
+    const errorMap = new Map<string, string>();
+    const notFoundMap = new Map<string, string>();
+    const interceptMap = new Map<string, string>();
+
+    const hasIntercepts = intercepts.length > 0;
+
+    const rrSpecifiers: t.ImportSpecifier[] = [
+        createNamedImport('createBrowserRouter'),
+        createNamedImport('RouterProvider'),
+        createNamedImport('Outlet'),
+    ];
+    if (hasIntercepts) {
+        rrSpecifiers.push(createNamedImport('useLocation'));
+        rrSpecifiers.push(createNamedImport('matchPath'));
+    }
+    statements.push(createImportDeclaration(rrSpecifiers, 'react-router-dom'));
+
+    const reactSpecifiers: t.ImportSpecifier[] = [
+        createNamedImport('Suspense'),
+        createNamedImport('createElement'),
+    ];
+    if (lazy) reactSpecifiers.unshift(createNamedImport('lazy'));
+    statements.push(
+        t.importDeclaration(
+            [t.importDefaultSpecifier(t.identifier('React')), ...reactSpecifiers],
+            t.stringLiteral('react')
+        )
+    );
+
+    function safeIdent(absPath: string): string {
+        // pathToIdentifier was originally written for URL patterns and only
+        // strips `/`, `:`, `*`, `[`, `]`. Filesystem paths can carry `\` (on
+        // Windows), `(`, `)` (route groups), `.` (extensions), `@` (parallel
+        // slots), etc. Strip everything that isn't a JS identifier character
+        // before handing it off so we always produce a valid identifier.
+        const importPath = normalizeImportPath(absPath, rootDir)
+            .replace(/[^A-Za-z0-9]/g, '_');
+        return pathToIdentifier(importPath);
+    }
+
+    function emit(prefix: string, kind: Map<string, string>, paths: string[]): void {
+        let i = 0;
+        const seen = new Set<string>();
+        for (const p of paths) {
+            if (seen.has(p)) continue;
+            seen.add(p);
+            const safe = safeIdent(p);
+            const name = `${prefix}${safe || i++}`;
+            const importPath = normalizeImportPath(p, rootDir);
+            if (lazy) {
+                statements.push(createLazyImport(name, importPath));
+            } else {
+                statements.push(
+                    createImportDeclaration([createDefaultImport(name)], `/${importPath}`)
+                );
+            }
+            kind.set(p, name);
+        }
+    }
+
+    emit('Page', componentMap, paths.pages);
+    emit('Layout', layoutMap, paths.layouts);
+    emit('Loading', loadingMap, paths.loadings);
+    emit('ErrorBoundary', errorMap, paths.errors);
+    emit('NotFound', notFoundMap, paths.notFounds);
+    emit('Intercept', interceptMap, intercepts.map((ic) => ic.pagePath));
+
+    // Source loadings of intercepts (in addition to regular ones)
+    const extraLoadings = intercepts
+        .map((ic) => ic.loadingPath)
+        .filter((p): p is string => Boolean(p) && !loadingMap.has(p as string));
+    if (extraLoadings.length) {
+        emit('Loading', loadingMap, extraLoadings);
+    }
+
+    return { statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap, interceptMap };
 }
 
 /**
@@ -657,7 +1023,17 @@ function generateRoutesAST(
     routes: ParsedRoute[],
     options: CodeGeneratorOptions
 ): t.Program {
-    const { rootDir, lazy = true, rootNotFound, intercepts = [] } = options;
+    const {
+        rootDir,
+        lazy = true,
+        rootNotFound,
+        intercepts = [],
+        tree,
+        rootLayout,
+        rootPage,
+        rootError,
+        rootLoading,
+    } = options;
 
     if (routes.length === 0) {
         return generateEmptyRoutesAST();
@@ -688,109 +1064,163 @@ function generateRoutesAST(
         interceptsByTarget.set(ic.targetPattern, list);
     }
 
-    const { statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap, interceptMap } =
-        collectImports(routes, rootDir, lazy, rootNotFound, usableIntercepts);
+    // The tree-based path produces correct error-boundary placement (matching
+    // Next.js semantics: error.tsx renders in the <Outlet/> of its segment's
+    // layout, not at the leaf). Tree is always provided in production by the
+    // server/build handlers.
+    const useTree = !!tree;
+
+    let statements: t.Statement[];
+    let componentMap: Map<string, string>;
+    let layoutMap: Map<string, string>;
+    let loadingMap: Map<string, string>;
+    let errorMap: Map<string, string>;
+    let notFoundMap: Map<string, string>;
+    let interceptMap: Map<string, string>;
+
+    if (useTree) {
+        const paths = collectPathsFromTree(tree!, {
+            layoutPath: rootLayout,
+            pagePath: rootPage,
+            loadingPath: rootLoading,
+            errorPath: rootError,
+            notFoundPath: rootNotFound,
+        });
+        ({ statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap, interceptMap } =
+            collectImportsFromPaths(paths, rootDir, lazy, usableIntercepts));
+    } else {
+        ({ statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap, interceptMap } =
+            collectImports(routes, rootDir, lazy, rootNotFound, usableIntercepts));
+    }
 
     if (usableIntercepts.length > 0) {
         statements.push(createInterceptResolverDeclaration());
     }
 
-    // Group routes by root layout
-    const routesByRootLayout = new Map<string, ParsedRoute[]>();
-    const routesWithoutLayout: ParsedRoute[] = [];
-
-    for (const route of routes) {
-        if (route.layouts.length > 0) {
-            const rootLayout = route.layouts[0]!;
-            if (!routesByRootLayout.has(rootLayout)) {
-                routesByRootLayout.set(rootLayout, []);
-            }
-            routesByRootLayout.get(rootLayout)!.push(route);
-        } else {
-            routesWithoutLayout.push(route);
-        }
-    }
-
-    // Find the most common root loading/error components for the root layout
-    const findRootContextComponents = (layoutRoutes: ParsedRoute[]) => {
-        // Use the first route's loading/error as root context (typically inherited from root)
-        const firstRoute = layoutRoutes[0];
-        return {
-            loadingPath: firstRoute?.loadingPath,
-            errorPath: firstRoute?.errorPath,
-        };
-    };
-
-    // Build route definitions array
     const routeDefinitions: t.ObjectExpression[] = [];
 
-    // Routes with root layout
-    for (const [rootLayoutPath, layoutRoutes] of routesByRootLayout) {
-        const rootLayoutName = layoutMap.get(rootLayoutPath)!;
-        const rootContext = findRootContextComponents(layoutRoutes);
-        const rootLoadingName = rootContext.loadingPath ? loadingMap.get(rootContext.loadingPath) : undefined;
-        const rootErrorName = rootContext.errorPath ? errorMap.get(rootContext.errorPath) : undefined;
+    if (useTree) {
+        const ctx: BuilderCtx = {
+            componentMap,
+            layoutMap,
+            loadingMap,
+            errorMap,
+            notFoundMap,
+            interceptMap,
+            interceptsByTarget,
+            lazy,
+        };
 
-        const childRoutes = layoutRoutes.map((route) =>
-            buildRouteExpression(
-                route,
-                componentMap,
-                layoutMap,
-                loadingMap,
-                errorMap,
-                notFoundMap,
-                interceptMap,
-                interceptsByTarget,
-                lazy
-            )
-        );
+        // Synthesise a virtual root node from the per-app metadata so the
+        // recursive builder treats the app root uniformly with deeper segments.
+        const virtualRoot: RouteNode = {
+            segment: '',
+            path: '/',
+            isDynamic: false,
+            isCatchAll: false,
+            isOptionalCatchAll: false,
+            isGroup: false,
+            children: tree!,
+            ...(rootLayout ? { layoutPath: rootLayout } : {}),
+            ...(rootPage ? { pagePath: rootPage } : {}),
+            ...(rootError ? { errorPath: rootError } : {}),
+            ...(rootLoading ? { loadingPath: rootLoading } : {}),
+            ...(rootNotFound ? { notFoundPath: rootNotFound } : {}),
+        };
 
-        const rootRouteProps: t.ObjectProperty[] = [
-            createRouteProperty('path', t.stringLiteral('/')),
-            createRouteProperty('element', createSuspenseWrapper(rootLayoutName, lazy, rootLoadingName)),
-            createRouteProperty('children', t.arrayExpression(childRoutes)),
-        ];
+        routeDefinitions.push(...buildSubtree(virtualRoot, undefined, ctx, true));
+    } else {
+        // Legacy flat path: kept so external callers passing only `routes` still
+        // produce working output (errorElement falls on the page node — the old
+        // behavior).
+        const routesByRootLayout = new Map<string, ParsedRoute[]>();
+        const routesWithoutLayout: ParsedRoute[] = [];
 
-        // Add errorElement to root layout if exists
-        if (rootErrorName) {
-            rootRouteProps.push(
-                createRouteProperty('errorElement', createCreateElementCallExpression(rootErrorName, t.nullLiteral(), []))
-            );
+        for (const route of routes) {
+            if (route.layouts.length > 0) {
+                const rootLayoutPath = route.layouts[0]!;
+                if (!routesByRootLayout.has(rootLayoutPath)) {
+                    routesByRootLayout.set(rootLayoutPath, []);
+                }
+                routesByRootLayout.get(rootLayoutPath)!.push(route);
+            } else {
+                routesWithoutLayout.push(route);
+            }
         }
 
-        routeDefinitions.push(createRouteObject(rootRouteProps));
-    }
+        const findRootContextComponents = (layoutRoutes: ParsedRoute[]) => {
+            const firstRoute = layoutRoutes[0];
+            return {
+                loadingPath: firstRoute?.loadingPath,
+                errorPath: firstRoute?.errorPath,
+            };
+        };
 
-    // Routes without layout
-    for (const route of routesWithoutLayout) {
-        const pageName = componentMap.get(route.pagePath)!;
-        const loadingName = route.loadingPath ? loadingMap.get(route.loadingPath) : undefined;
-        const errorName = route.errorPath ? errorMap.get(route.errorPath) : undefined;
+        for (const [rootLayoutPath, layoutRoutes] of routesByRootLayout) {
+            const rootLayoutName = layoutMap.get(rootLayoutPath)!;
+            const rootContext = findRootContextComponents(layoutRoutes);
+            const rootLoadingName = rootContext.loadingPath ? loadingMap.get(rootContext.loadingPath) : undefined;
+            const rootErrorName = rootContext.errorPath ? errorMap.get(rootContext.errorPath) : undefined;
 
-        let pageElement: t.Expression = createSuspenseWrapper(pageName, lazy, loadingName);
-        const targetIntercepts = interceptsByTarget.get(route.pattern);
-        if (targetIntercepts && targetIntercepts.length > 0) {
-            pageElement = wrapWithInterceptResolver(
-                pageElement,
-                targetIntercepts,
-                interceptMap,
-                loadingMap,
-                lazy
+            const childRoutes = layoutRoutes.map((route) =>
+                buildRouteExpression(
+                    route,
+                    componentMap,
+                    layoutMap,
+                    loadingMap,
+                    errorMap,
+                    notFoundMap,
+                    interceptMap,
+                    interceptsByTarget,
+                    lazy
+                )
             );
+
+            const rootRouteProps: t.ObjectProperty[] = [
+                createRouteProperty('path', t.stringLiteral('/')),
+                createRouteProperty('element', createSuspenseWrapper(rootLayoutName, lazy, rootLoadingName)),
+                createRouteProperty('children', t.arrayExpression(childRoutes)),
+            ];
+
+            if (rootErrorName) {
+                rootRouteProps.push(
+                    createRouteProperty('errorElement', createCreateElementCallExpression(rootErrorName, t.nullLiteral(), []))
+                );
+            }
+
+            routeDefinitions.push(createRouteObject(rootRouteProps));
         }
 
-        const routeProps: t.ObjectProperty[] = [
-            createRouteProperty('path', t.stringLiteral(route.pattern)),
-            createRouteProperty('element', pageElement),
-        ];
+        for (const route of routesWithoutLayout) {
+            const pageName = componentMap.get(route.pagePath)!;
+            const loadingName = route.loadingPath ? loadingMap.get(route.loadingPath) : undefined;
+            const errorName = route.errorPath ? errorMap.get(route.errorPath) : undefined;
 
-        if (errorName) {
-            routeProps.push(
-                createRouteProperty('errorElement', createCreateElementCallExpression(errorName, t.nullLiteral(), []))
-            );
+            let pageElement: t.Expression = createSuspenseWrapper(pageName, lazy, loadingName);
+            const targetIntercepts = interceptsByTarget.get(route.pattern);
+            if (targetIntercepts && targetIntercepts.length > 0) {
+                pageElement = wrapWithInterceptResolver(
+                    pageElement,
+                    targetIntercepts,
+                    interceptMap,
+                    loadingMap,
+                    lazy
+                );
+            }
+
+            const routeProps: t.ObjectProperty[] = [
+                createRouteProperty('path', t.stringLiteral(route.pattern)),
+                createRouteProperty('element', pageElement),
+            ];
+
+            if (errorName) {
+                routeProps.push(
+                    createRouteProperty('errorElement', createCreateElementCallExpression(errorName, t.nullLiteral(), []))
+                );
+            }
+
+            routeDefinitions.push(createRouteObject(routeProps));
         }
-
-        routeDefinitions.push(createRouteObject(routeProps));
     }
 
     // Add catch-all not-found route at root level (outside of layout)

@@ -451,6 +451,8 @@ export function parseAppRouter(options: PluginOptions = {}): {
     tree: RouteNode[];
     rootLayout?: string;
     rootPage?: string;
+    rootError?: string;
+    rootLoading?: string;
     rootNotFound?: string;
 } {
     const appDir = options.appDir || 'src/app';
@@ -489,6 +491,8 @@ export function parseAppRouter(options: PluginOptions = {}): {
         tree,
         rootLayout: root.layoutPath,
         rootPage: root.pagePath,
+        rootError: root.errorPath,
+        rootLoading: root.loadingPath,
         rootNotFound: root.notFoundPath,
     };
 }
