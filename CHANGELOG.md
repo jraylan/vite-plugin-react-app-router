@@ -2,11 +2,16 @@
 
 ## [0.1.14](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.13...v0.1.14) (2026-04-26)
 
-
+ 
 ### Features
 
 * add shared route modules to allow reusable path tree ([7658258](https://github.com/jraylan/vite-plugin-react-app-router/commit/76582588c04345478dff4960648356501b119455))
 * implement parallel routes ([7658258](https://github.com/jraylan/vite-plugin-react-app-router/commit/76582588c04345478dff4960648356501b119455))
+
+
+### Miscellaneous Chores
+* remove post-install script to reduce risks of forwarding supply chain attacks ([89c8b7](https://github.com/jraylan/vite-plugin-react-app-router/commit/589c8b7))
+
 
 ## [0.1.13](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.12...v0.1.13) (2026-04-25)
 
@@ -14,13 +19,6 @@
 ### Bug Fixes
 
 * fix broken package due to a bad build workflow ([e1621bc](https://github.com/jraylan/vite-plugin-react-app-router/commit/e1621bcbdc2dce35237768d05d7e0859257a04a4))
-
-## [0.1.12](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.11...v0.1.12) (2026-04-25)
-
-
-### Miscellaneous Chores
-
-* release 0.1.12 ([8b5db53](https://github.com/jraylan/vite-plugin-react-app-router/commit/8b5db534e6386572c751473cc194446438288cb0))
 
 ## [0.1.11](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.10...v0.1.11) (2026-04-25)
 
