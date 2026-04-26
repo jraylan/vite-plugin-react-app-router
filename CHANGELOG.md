@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.14](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.13...v0.1.14) (2026-04-26)
+
+
+### Features
+
+* add shared route modules to allow reusable path tree ([7658258](https://github.com/jraylan/vite-plugin-react-app-router/commit/76582588c04345478dff4960648356501b119455))
+* implement parallel routes ([7658258](https://github.com/jraylan/vite-plugin-react-app-router/commit/76582588c04345478dff4960648356501b119455))
+
 ## [0.1.13](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.12...v0.1.13) (2026-04-25)
 
 
