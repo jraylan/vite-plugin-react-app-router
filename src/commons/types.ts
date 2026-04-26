@@ -37,6 +37,83 @@ export interface RouteNode {
     isIntercepting?: boolean;
     /** URL pattern of the source (parent of the intercepting marker) */
     interceptSource?: string;
+    /** Parallel-route slots owned by this segment (siblings of layout.tsx) */
+    slots?: ParallelSlot[];
+    /**
+     * If this node was produced by grafting a `[+name]/`/`(+name)/` invocation,
+     * the active sub-shared names at that invocation (after applying any
+     * `[-omit]/` overrides). Codegen uses this to emit a SharedModuleProvider
+     * so descendants can query via useSharedModule(name).
+     */
+    sharedInvocation?: {
+        name: string;
+        activeSubShareds: string[];
+    };
+    /**
+     * Path to a `props.tsx` (or .ts/.jsx/.js) file declared at this level of
+     * a shared-module invocation. Codegen imports the default export and
+     * wraps the subtree with a SharedPropsProvider; useSharedProps() reads it.
+     */
+    sharedPropsPath?: string;
+    /**
+     * Internal: marks a placeholder node inside a shared module's tree for a
+     * nested sub-shared (`+sub/`). Carries the full sub-shared definition.
+     * Replaced during grafting.
+     */
+    isSharedDef?: boolean;
+    sharedDef?: SharedModuleDef;
+}
+
+/**
+ * Definition of a `+name/` shared route module discovered during the first
+ * parser pass. Materialized into the route tree at every `[+name]/` /
+ * `(+name)/` invocation that can see it (visibility = siblings of the
+ * directory that contains `+name/`).
+ */
+export interface SharedModuleDef {
+    /** Name (without leading `+`). */
+    name: string;
+    /** Absolute path of the `+name/` directory itself. */
+    dirPath: string;
+    /** Parent directory of `+name/` — its siblings + descendants are the visibility scope. */
+    containerDir: string;
+    /** Files at `+name/` root. */
+    layoutPath?: string;
+    pagePath?: string;
+    loadingPath?: string;
+    errorPath?: string;
+    notFoundPath?: string;
+    /**
+     * Subtree (children of `+name/`). Nodes with `isSharedDef` flag are
+     * placeholders for nested sub-shareds, expanded at invocation time.
+     */
+    tree: RouteNode[];
+    /** Sub-shareds discovered nested inside this module's tree (by name). */
+    subShareds: Record<string, SharedModuleDef>;
+}
+
+/**
+ * A parallel route slot (Next.js `@name/` convention). The slot's tree is
+ * matched independently against the URL and exposed to the owning layout via
+ * the `useSlot(name)` hook.
+ */
+export interface ParallelSlot {
+    /** Slot name without the leading `@` (e.g. "modal" for `@modal/`). */
+    name: string;
+    /** Children of the slot dir, parsed as a normal route tree. */
+    tree: RouteNode[];
+    /** Slot's own page.tsx, if any. */
+    pagePath?: string;
+    /** Slot's own layout.tsx, if any. */
+    layoutPath?: string;
+    /** Slot's own loading.tsx, if any. */
+    loadingPath?: string;
+    /** Slot's own error.tsx, if any. */
+    errorPath?: string;
+    /** Slot's own not-found.tsx, if any. */
+    notFoundPath?: string;
+    /** Slot's `default.tsx`, rendered when no route in the slot matches. */
+    defaultPath?: string;
 }
 
 export interface ParsedRoute {

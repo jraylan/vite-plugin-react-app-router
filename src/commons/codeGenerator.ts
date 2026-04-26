@@ -7,7 +7,7 @@
 
 import * as t from '@babel/types';
 import _generate from '@babel/generator';
-import type { ParsedRoute, InterceptedRoute, RouteNode } from './types.js';
+import type { ParsedRoute, InterceptedRoute, RouteNode, ParallelSlot } from './types.js';
 import { pathToIdentifier } from './routeParser.js';
 
 /** State key on history.state used to signal an intercepted navigation. */
@@ -664,6 +664,8 @@ export interface CodeGeneratorOptions {
     rootError?: string;
     /** Root loading.tsx absolute path */
     rootLoading?: string;
+    /** Parallel-route slots owned by the app root segment. */
+    rootSlots?: ParallelSlot[];
 }
 
 /**
@@ -677,7 +679,78 @@ interface BuilderCtx {
     notFoundMap: Map<string, string>;
     interceptMap: Map<string, string>;
     interceptsByTarget: Map<string, InterceptedRoute[]>;
+    /** Map of `default.tsx` absolute path → import name. */
+    defaultMap: Map<string, string>;
+    /** Map of `props.tsx` absolute path → import name (eager default import). */
+    sharedPropsMap: Map<string, string>;
     lazy: boolean;
+}
+
+/**
+ * Returns true if any node in the tree (or its descendants, including inside
+ * other slots) declares parallel slots. Used to decide whether to emit the
+ * SlotProvider import.
+ */
+function hasSlotInAnyNode(tree: RouteNode[]): boolean {
+    for (const n of tree) {
+        if (n.slots && n.slots.length > 0) return true;
+        if (hasSlotInAnyNode(n.children)) return true;
+        if (n.slots) {
+            for (const s of n.slots) {
+                if (hasSlotInAnyNode(s.tree)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * Returns true if any node in the tree carries a shared-module invocation
+ * marker (placed there by graftSharedModule). Drives whether the codegen
+ * emits the SharedModuleProvider import.
+ */
+function hasSharedInvocationInAnyNode(tree: RouteNode[]): boolean {
+    for (const n of tree) {
+        if (n.sharedInvocation) return true;
+        if (hasSharedInvocationInAnyNode(n.children)) return true;
+        if (n.slots) {
+            for (const s of n.slots) {
+                if (hasSharedInvocationInAnyNode(s.tree)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * Returns true if any node carries a `sharedPropsPath` (props.tsx at an
+ * invocation site). Drives the SharedPropsProvider import + provider wrap.
+ */
+function hasSharedPropsInAnyNode(tree: RouteNode[]): boolean {
+    for (const n of tree) {
+        if (n.sharedPropsPath) return true;
+        if (hasSharedPropsInAnyNode(n.children)) return true;
+        if (n.slots) {
+            for (const s of n.slots) {
+                if (hasSharedPropsInAnyNode(s.tree)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * Computes a child path relative to the root of the subtree being built.
+ *
+ *   relativeFromRoot('/dashboard/photo/:id', '/dashboard') -> 'photo/:id'
+ *   relativeFromRoot('/about', '/')                         -> 'about'
+ *   relativeFromRoot('/dashboard', '/dashboard')            -> ''
+ */
+function relativeFromRoot(absolute: string, root: string): string {
+    if (root === '/' || root === '') return absolute.replace(/^\//, '');
+    if (absolute === root) return '';
+    if (absolute.startsWith(root + '/')) return absolute.slice(root.length + 1);
+    return absolute.replace(/^\//, '');
 }
 
 /**
@@ -706,13 +779,15 @@ function makePageNode(
     node: { path: string; pagePath: string },
     inheritedLoading: string | undefined,
     ctx: BuilderCtx,
-    insideLayout: boolean
+    insideLayout: boolean,
+    subtreeRoot: string
 ): t.ObjectExpression {
     const pageName = ctx.componentMap.get(node.pagePath)!;
     const loadingName = pickLoading(undefined, inheritedLoading, ctx);
-    const isRootPath = node.path === '/' || node.path === '';
-    const useIndex = insideLayout && isRootPath;
-    const path = isRootPath ? '/' : node.path.replace(/^\//, '');
+    const isAtRoot = node.path === subtreeRoot
+        || (subtreeRoot === '/' && (node.path === '' || node.path === '/'));
+    const useIndex = insideLayout && isAtRoot;
+    const path = isAtRoot ? subtreeRoot : relativeFromRoot(node.path, subtreeRoot);
 
     let pageElement: t.Expression = createSuspenseWrapper(pageName, ctx.lazy, loadingName);
     const targetIntercepts = ctx.interceptsByTarget.get(node.path);
@@ -771,17 +846,42 @@ function makeLayoutNode(
     inheritedLoading: string | undefined,
     children: t.ObjectExpression[],
     ctx: BuilderCtx,
-    isRoot: boolean
+    isRoot: boolean,
+    subtreeRoot: string,
+    slotsExpr?: t.Expression,
+    sharedInfoExpr?: t.Expression,
+    sharedPropsExpr?: t.Expression
 ): t.ObjectExpression {
     const layoutName = ctx.layoutMap.get(layoutPath)!;
     const loadingName = pickLoading(undefined, inheritedLoading, ctx);
+    let element: t.Expression = createSuspenseWrapper(layoutName, ctx.lazy, loadingName);
+    if (slotsExpr) {
+        // <SlotProvider slots={…}>{<Suspense>…<Layout/>…</Suspense>}</SlotProvider>
+        element = createCreateElementCallExpression(
+            'SlotProvider',
+            t.objectExpression([t.objectProperty(t.identifier('slots'), slotsExpr)]),
+            [element]
+        );
+    }
+    if (sharedInfoExpr) {
+        element = createCreateElementCallExpression(
+            'SharedModuleProvider',
+            t.objectExpression([t.objectProperty(t.identifier('info'), sharedInfoExpr)]),
+            [element]
+        );
+    }
+    if (sharedPropsExpr) {
+        element = createCreateElementCallExpression(
+            'SharedPropsProvider',
+            t.objectExpression([t.objectProperty(t.identifier('props'), sharedPropsExpr)]),
+            [element]
+        );
+    }
     const props: t.ObjectProperty[] = [];
     if (isRoot) {
-        props.push(createRouteProperty('path', t.stringLiteral('/')));
+        props.push(createRouteProperty('path', t.stringLiteral(subtreeRoot)));
     }
-    props.push(
-        createRouteProperty('element', createSuspenseWrapper(layoutName, ctx.lazy, loadingName))
-    );
+    props.push(createRouteProperty('element', element));
     props.push(createRouteProperty('children', t.arrayExpression(children)));
     return createRouteObject(props);
 }
@@ -808,7 +908,8 @@ function buildSubtree(
     inheritedLoading: string | undefined,
     ctx: BuilderCtx,
     isRoot: boolean = false,
-    insideLayout: boolean = false
+    insideLayout: boolean = false,
+    subtreeRoot: string = '/'
 ): t.ObjectExpression[] {
     // Intercepting subtrees are handled separately via interceptsByTarget;
     // they do not contribute to the regular route table.
@@ -816,10 +917,12 @@ function buildSubtree(
 
     const localLoading = node.loadingPath || inheritedLoading;
 
-    // Anything we emit as a child of `node` is, in the final react-router
-    // tree, inside a layout iff `node` itself wraps in one OR we already are
-    // inside an ancestor's layout.
-    const childrenInsideLayout = insideLayout || !!node.layoutPath;
+    // The segment is wrapped in a layout iff it has its own layout.tsx OR has
+    // slots without a layout (in which case we synthesise an Outlet wrapper so
+    // the SlotProvider has somewhere to live).
+    const hasSlots = !!(node.slots && node.slots.length > 0);
+    const wrapsInLayoutLikeNode = !!node.layoutPath || hasSlots;
+    const childrenInsideLayout = insideLayout || wrapsInLayoutLikeNode;
 
     const inner: t.ObjectExpression[] = [];
 
@@ -829,7 +932,8 @@ function buildSubtree(
                 { path: node.path, pagePath: node.pagePath },
                 localLoading,
                 ctx,
-                childrenInsideLayout
+                childrenInsideLayout,
+                subtreeRoot
             )
         );
     }
@@ -837,7 +941,9 @@ function buildSubtree(
     // Route groups don't contribute their own segment but still emit pages.
     // Their children iterate normally below.
     for (const child of node.children) {
-        inner.push(...buildSubtree(child, localLoading, ctx, false, childrenInsideLayout));
+        inner.push(
+            ...buildSubtree(child, localLoading, ctx, false, childrenInsideLayout, subtreeRoot)
+        );
     }
 
     // not-found catch-all paired with this segment's layout
@@ -864,14 +970,155 @@ function buildSubtree(
         wrapped = [makeErrorWrapper(node.errorPath, wrapped, ctx)];
     }
 
-    if (node.layoutPath) {
-        return [makeLayoutNode(node.layoutPath, inheritedLoading, wrapped, ctx, isRoot)];
+    // Build the slots prop expression once — used for both the real-layout
+    // and synthetic-outlet branches below.
+    let slotsExpr: t.Expression | undefined;
+    if (hasSlots) {
+        slotsExpr = buildSlotsObject(node.slots!, ctx, node.path);
     }
 
-    // No layout: pass children up. The error wrapper (if any) becomes a
-    // pathless sibling at the parent level, capturing only the routes from
-    // this subtree.
+    // Shared-route-module invocation site: emit an info object that the
+    // runtime SharedModuleProvider exposes via useSharedModule().
+    let sharedInfoExpr: t.Expression | undefined;
+    if (node.sharedInvocation) {
+        sharedInfoExpr = t.objectExpression([
+            t.objectProperty(
+                t.identifier('name'),
+                t.stringLiteral(node.sharedInvocation.name)
+            ),
+            t.objectProperty(
+                t.identifier('activeSubShareds'),
+                t.arrayExpression(
+                    node.sharedInvocation.activeSubShareds.map((n) => t.stringLiteral(n))
+                )
+            ),
+        ]);
+    }
+
+    // props.tsx at this invocation level — pass the imported value to the
+    // SharedPropsProvider so descendants can read via useSharedProps().
+    let sharedPropsExpr: t.Expression | undefined;
+    if (node.sharedPropsPath) {
+        const propsName = ctx.sharedPropsMap.get(node.sharedPropsPath);
+        if (propsName) sharedPropsExpr = t.identifier(propsName);
+    }
+
+    if (node.layoutPath) {
+        return [
+            makeLayoutNode(
+                node.layoutPath,
+                inheritedLoading,
+                wrapped,
+                ctx,
+                isRoot,
+                subtreeRoot,
+                slotsExpr,
+                sharedInfoExpr,
+                sharedPropsExpr
+            ),
+        ];
+    }
+
+    if (hasSlots || sharedInfoExpr || sharedPropsExpr) {
+        // No layout, but the segment needs a wrapping element to host either a
+        // SlotProvider (parallel routes) or a SharedModuleProvider (shared
+        // module invocation without its own layout). Synthesise an Outlet so
+        // descendants render normally.
+        let wrappedEl: t.Expression = createCreateElementCallExpression(
+            'Outlet',
+            t.nullLiteral(),
+            []
+        );
+        if (slotsExpr) {
+            wrappedEl = createCreateElementCallExpression(
+                'SlotProvider',
+                t.objectExpression([t.objectProperty(t.identifier('slots'), slotsExpr)]),
+                [wrappedEl]
+            );
+        }
+        if (sharedInfoExpr) {
+            wrappedEl = createCreateElementCallExpression(
+                'SharedModuleProvider',
+                t.objectExpression([t.objectProperty(t.identifier('info'), sharedInfoExpr)]),
+                [wrappedEl]
+            );
+        }
+        if (sharedPropsExpr) {
+            wrappedEl = createCreateElementCallExpression(
+                'SharedPropsProvider',
+                t.objectExpression([t.objectProperty(t.identifier('props'), sharedPropsExpr)]),
+                [wrappedEl]
+            );
+        }
+        const props: t.ObjectProperty[] = [];
+        if (isRoot) {
+            props.push(createRouteProperty('path', t.stringLiteral(subtreeRoot)));
+        }
+        props.push(createRouteProperty('element', wrappedEl));
+        props.push(createRouteProperty('children', t.arrayExpression(wrapped)));
+        return [createRouteObject(props)];
+    }
+
+    // No layout, no slots, no shared-module wrapping: pass children up.
     return wrapped;
+}
+
+/**
+ * Builds the `slots` object literal passed to <SlotProvider>:
+ *
+ *   { modal: { routes: [...], defaultElement: <Default/> }, ... }
+ *
+ * Each slot's routes are produced by buildSubtree on a virtual root rooted at
+ * the OWNER's URL — so useRoutes() can match the slot independently against
+ * the live location.
+ */
+function buildSlotsObject(
+    slots: ParallelSlot[],
+    ctx: BuilderCtx,
+    ownerPath: string
+): t.ObjectExpression {
+    const props: t.ObjectProperty[] = [];
+    for (const slot of slots) {
+        const slotVirtualRoot: RouteNode = {
+            segment: '',
+            path: ownerPath,
+            isDynamic: false,
+            isCatchAll: false,
+            isOptionalCatchAll: false,
+            isGroup: false,
+            children: slot.tree,
+            ...(slot.layoutPath ? { layoutPath: slot.layoutPath } : {}),
+            ...(slot.pagePath ? { pagePath: slot.pagePath } : {}),
+            ...(slot.errorPath ? { errorPath: slot.errorPath } : {}),
+            ...(slot.loadingPath ? { loadingPath: slot.loadingPath } : {}),
+            ...(slot.notFoundPath ? { notFoundPath: slot.notFoundPath } : {}),
+        };
+
+        // Slots are consumed by useRoutes() at runtime with no enclosing
+        // parent route, so the paths must be absolute (full URL). We pass
+        // subtreeRoot='/' so makePageNode emits absolute patterns, and
+        // isRoot=false so any wrapping slot layout stays *pathless* — that
+        // way useRoutes returns null when no descendant matches and the
+        // SlotRenderer falls through to defaultElement.
+        const slotRoutes = buildSubtree(slotVirtualRoot, undefined, ctx, false, false, '/');
+
+        const definitionProps: t.ObjectProperty[] = [
+            t.objectProperty(t.identifier('routes'), t.arrayExpression(slotRoutes)),
+        ];
+        if (slot.defaultPath) {
+            const defaultName = ctx.defaultMap.get(slot.defaultPath);
+            if (defaultName) {
+                definitionProps.push(
+                    t.objectProperty(
+                        t.identifier('defaultElement'),
+                        createSuspenseWrapper(defaultName, ctx.lazy)
+                    )
+                );
+            }
+        }
+        props.push(t.objectProperty(t.identifier(slot.name), t.objectExpression(definitionProps)));
+    }
+    return t.objectExpression(props);
 }
 
 /**
@@ -884,23 +1131,46 @@ interface CollectedPaths {
     loadings: string[];
     errors: string[];
     notFounds: string[];
+    /** `default.tsx` of parallel-route slots (rendered when nothing matches). */
+    defaults: string[];
+    /** `props.tsx` declared at shared-module invocation sites. */
+    sharedProps: string[];
 }
 
 function collectPathsFromTree(
     tree: RouteNode[],
-    rootInfo: { layoutPath?: string; pagePath?: string; loadingPath?: string; errorPath?: string; notFoundPath?: string }
+    rootInfo: {
+        layoutPath?: string;
+        pagePath?: string;
+        loadingPath?: string;
+        errorPath?: string;
+        notFoundPath?: string;
+    },
+    rootSlots?: ParallelSlot[]
 ): CollectedPaths {
     const pages: string[] = [];
     const layouts: string[] = [];
     const loadings: string[] = [];
     const errors: string[] = [];
     const notFounds: string[] = [];
+    const defaults: string[] = [];
+    const sharedProps: string[] = [];
 
     if (rootInfo.pagePath) pages.push(rootInfo.pagePath);
     if (rootInfo.layoutPath) layouts.push(rootInfo.layoutPath);
     if (rootInfo.loadingPath) loadings.push(rootInfo.loadingPath);
     if (rootInfo.errorPath) errors.push(rootInfo.errorPath);
     if (rootInfo.notFoundPath) notFounds.push(rootInfo.notFoundPath);
+
+    function walkSlot(slot: ParallelSlot): void {
+        if (slot.pagePath) pages.push(slot.pagePath);
+        if (slot.layoutPath) layouts.push(slot.layoutPath);
+        if (slot.loadingPath) loadings.push(slot.loadingPath);
+        if (slot.errorPath) errors.push(slot.errorPath);
+        if (slot.notFoundPath) notFounds.push(slot.notFoundPath);
+        if (slot.defaultPath) defaults.push(slot.defaultPath);
+        for (const c of slot.tree) walk(c);
+    }
 
     function walk(node: RouteNode): void {
         if (node.isIntercepting) return;
@@ -909,11 +1179,14 @@ function collectPathsFromTree(
         if (node.loadingPath) loadings.push(node.loadingPath);
         if (node.errorPath) errors.push(node.errorPath);
         if (node.notFoundPath) notFounds.push(node.notFoundPath);
+        if (node.sharedPropsPath) sharedProps.push(node.sharedPropsPath);
+        if (node.slots) for (const s of node.slots) walkSlot(s);
         for (const c of node.children) walk(c);
     }
     for (const n of tree) walk(n);
+    if (rootSlots) for (const s of rootSlots) walkSlot(s);
 
-    return { pages, layouts, loadings, errors, notFounds };
+    return { pages, layouts, loadings, errors, notFounds, defaults, sharedProps };
 }
 
 /**
@@ -924,7 +1197,10 @@ function collectImportsFromPaths(
     paths: CollectedPaths,
     rootDir: string,
     lazy: boolean,
-    intercepts: InterceptedRoute[]
+    intercepts: InterceptedRoute[],
+    hasSlots: boolean,
+    hasSharedInvocations: boolean,
+    hasSharedProps: boolean
 ): {
     statements: t.Statement[];
     componentMap: Map<string, string>;
@@ -933,6 +1209,8 @@ function collectImportsFromPaths(
     errorMap: Map<string, string>;
     notFoundMap: Map<string, string>;
     interceptMap: Map<string, string>;
+    defaultMap: Map<string, string>;
+    sharedPropsMap: Map<string, string>;
 } {
     const statements: t.Statement[] = [];
     const componentMap = new Map<string, string>();
@@ -941,6 +1219,8 @@ function collectImportsFromPaths(
     const errorMap = new Map<string, string>();
     const notFoundMap = new Map<string, string>();
     const interceptMap = new Map<string, string>();
+    const defaultMap = new Map<string, string>();
+    const sharedPropsMap = new Map<string, string>();
 
     const hasIntercepts = intercepts.length > 0;
 
@@ -954,6 +1234,19 @@ function collectImportsFromPaths(
         rrSpecifiers.push(createNamedImport('matchPath'));
     }
     statements.push(createImportDeclaration(rrSpecifiers, 'react-router-dom'));
+
+    // Pull runtime providers from the package — SlotProvider (parallel routes),
+    // SharedModuleProvider (shared route modules) and SharedPropsProvider
+    // (props.tsx forwarding). One import statement when any combination is in use.
+    if (hasSlots || hasSharedInvocations || hasSharedProps) {
+        const specs: t.ImportSpecifier[] = [];
+        if (hasSlots) specs.push(createNamedImport('SlotProvider'));
+        if (hasSharedInvocations) specs.push(createNamedImport('SharedModuleProvider'));
+        if (hasSharedProps) specs.push(createNamedImport('SharedPropsProvider'));
+        statements.push(
+            createImportDeclaration(specs, 'vite-plugin-react-app-router/runtime')
+        );
+    }
 
     const reactSpecifiers: t.ImportSpecifier[] = [
         createNamedImport('Suspense'),
@@ -998,12 +1291,35 @@ function collectImportsFromPaths(
         }
     }
 
+    /**
+     * Emit eager default imports (never lazy). Used for `props.tsx` modules
+     * since their values are read synchronously when wrapping the subtree —
+     * a Promise from React.lazy would not be a usable props object.
+     */
+    function emitEager(prefix: string, kind: Map<string, string>, paths: string[]): void {
+        let i = 0;
+        const seen = new Set<string>();
+        for (const p of paths) {
+            if (seen.has(p)) continue;
+            seen.add(p);
+            const safe = safeIdent(p);
+            const name = `${prefix}${safe || i++}`;
+            const importPath = normalizeImportPath(p, rootDir);
+            statements.push(
+                createImportDeclaration([createDefaultImport(name)], `/${importPath}`)
+            );
+            kind.set(p, name);
+        }
+    }
+
     emit('Page', componentMap, paths.pages);
     emit('Layout', layoutMap, paths.layouts);
     emit('Loading', loadingMap, paths.loadings);
     emit('ErrorBoundary', errorMap, paths.errors);
     emit('NotFound', notFoundMap, paths.notFounds);
     emit('Intercept', interceptMap, intercepts.map((ic) => ic.pagePath));
+    emit('Default', defaultMap, paths.defaults);
+    emitEager('SharedProps', sharedPropsMap, paths.sharedProps);
 
     // Source loadings of intercepts (in addition to regular ones)
     const extraLoadings = intercepts
@@ -1013,7 +1329,17 @@ function collectImportsFromPaths(
         emit('Loading', loadingMap, extraLoadings);
     }
 
-    return { statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap, interceptMap };
+    return {
+        statements,
+        componentMap,
+        layoutMap,
+        loadingMap,
+        errorMap,
+        notFoundMap,
+        interceptMap,
+        defaultMap,
+        sharedPropsMap,
+    };
 }
 
 /**
@@ -1033,6 +1359,7 @@ function generateRoutesAST(
         rootPage,
         rootError,
         rootLoading,
+        rootSlots,
     } = options;
 
     if (routes.length === 0) {
@@ -1077,17 +1404,49 @@ function generateRoutesAST(
     let errorMap: Map<string, string>;
     let notFoundMap: Map<string, string>;
     let interceptMap: Map<string, string>;
+    let defaultMap: Map<string, string> = new Map();
+    let sharedPropsMap: Map<string, string> = new Map();
+
+    // Detect any slot, shared-module invocation, or shared props anywhere in
+    // the tree to know which runtime imports must be emitted.
+    const hasAnySlot = !!(
+        (rootSlots && rootSlots.length > 0) ||
+        (tree && hasSlotInAnyNode(tree))
+    );
+    const hasAnySharedInvocation = !!(tree && hasSharedInvocationInAnyNode(tree));
+    const hasAnySharedProps = !!(tree && hasSharedPropsInAnyNode(tree));
 
     if (useTree) {
-        const paths = collectPathsFromTree(tree!, {
-            layoutPath: rootLayout,
-            pagePath: rootPage,
-            loadingPath: rootLoading,
-            errorPath: rootError,
-            notFoundPath: rootNotFound,
-        });
-        ({ statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap, interceptMap } =
-            collectImportsFromPaths(paths, rootDir, lazy, usableIntercepts));
+        const paths = collectPathsFromTree(
+            tree!,
+            {
+                layoutPath: rootLayout,
+                pagePath: rootPage,
+                loadingPath: rootLoading,
+                errorPath: rootError,
+                notFoundPath: rootNotFound,
+            },
+            rootSlots
+        );
+        ({
+            statements,
+            componentMap,
+            layoutMap,
+            loadingMap,
+            errorMap,
+            notFoundMap,
+            interceptMap,
+            defaultMap,
+            sharedPropsMap,
+        } = collectImportsFromPaths(
+            paths,
+            rootDir,
+            lazy,
+            usableIntercepts,
+            hasAnySlot,
+            hasAnySharedInvocation,
+            hasAnySharedProps
+        ));
     } else {
         ({ statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap, interceptMap } =
             collectImports(routes, rootDir, lazy, rootNotFound, usableIntercepts));
@@ -1108,6 +1467,8 @@ function generateRoutesAST(
             notFoundMap,
             interceptMap,
             interceptsByTarget,
+            defaultMap,
+            sharedPropsMap,
             lazy,
         };
 
@@ -1126,9 +1487,10 @@ function generateRoutesAST(
             ...(rootError ? { errorPath: rootError } : {}),
             ...(rootLoading ? { loadingPath: rootLoading } : {}),
             ...(rootNotFound ? { notFoundPath: rootNotFound } : {}),
+            ...(rootSlots && rootSlots.length > 0 ? { slots: rootSlots } : {}),
         };
 
-        routeDefinitions.push(...buildSubtree(virtualRoot, undefined, ctx, true));
+        routeDefinitions.push(...buildSubtree(virtualRoot, undefined, ctx, true, false, '/'));
     } else {
         // Legacy flat path: kept so external callers passing only `routes` still
         // produce working output (errorElement falls on the page node — the old

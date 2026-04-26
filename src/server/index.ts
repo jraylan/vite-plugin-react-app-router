@@ -60,7 +60,14 @@ function regenerateRoutes(): string {
     }
 
     const rootDir = ctx.config.root;
-    const appDir = ctx.options.appDir || path.join(rootDir, "src/app");
+    // ctx.appDir is normally pre-set by configResolved; fall back here in case
+    // the virtual module is loaded outside the standard plugin lifecycle.
+    const appDir = ctx.appDir
+        ?? (ctx.options.appDir
+            ? (path.isAbsolute(ctx.options.appDir)
+                ? ctx.options.appDir
+                : path.resolve(rootDir, ctx.options.appDir))
+            : path.join(rootDir, "src/app"));
     ctx.appDir = appDir;
 
     if (!fs.existsSync(appDir)) {
@@ -85,37 +92,81 @@ function regenerateRoutes(): string {
         rootPage: parsed.rootPage,
         rootError: parsed.rootError,
         rootLoading: parsed.rootLoading,
+        rootSlots: parsed.rootSlots,
     });
     outputDebug(ctx.cachedCode);
     return ctx.cachedCode;
 }
 
 /**
- * Checks if a file is inside the app directory
+ * Checks if a file (or directory) lives inside the app directory.
  */
-function isAppFile(filePath: string): boolean {
+function isAppPath(filePath: string): boolean {
     if (!ctx.appDir) return false;
     const normalizedPath = path.normalize(filePath);
     const normalizedAppDir = path.normalize(ctx.appDir);
-    return normalizedPath.startsWith(normalizedAppDir);
+    return normalizedPath === normalizedAppDir
+        || normalizedPath.startsWith(normalizedAppDir + path.sep);
 }
 
 /**
- * Checks if it's a route file (page, layout, etc.)
+ * Checks if it's a route-relevant file (page, layout, loading, error,
+ * not-found, default).
  */
 function isRouteFile(filePath: string): boolean {
     const basename = path.basename(filePath);
-    const routeFiles = ["page", "layout", "loading", "error", "not-found"];
+    const routeFiles = ["page", "layout", "loading", "error", "not-found", "default"];
     return routeFiles.some(rf => basename.startsWith(rf));
+}
+
+/**
+ * Invalidates the cached virtual module and asks the dev client to do a full
+ * reload. Safe to call repeatedly — Vite coalesces concurrent reloads.
+ */
+function triggerReload(server: ViteDevServer): void {
+    ctx.cachedCode = undefined;
+    const mod = server.moduleGraph.getModuleById(RESOLVED_VIRTUAL_MODULE_ID);
+    if (mod) {
+        server.moduleGraph.invalidateModule(mod);
+    }
+    server.ws.send({ type: "full-reload", path: "*" });
 }
 
 const serverHandler: PluginHookHandler = {
     configResolved(config: ResolvedConfig) {
         ctx.config = config;
+        // Resolve appDir eagerly so the watcher hooks below can match paths
+        // even before the virtual module has been requested for the first time.
+        ctx.appDir = ctx.options.appDir
+            ? path.isAbsolute(ctx.options.appDir)
+                ? ctx.options.appDir
+                : path.resolve(config.root, ctx.options.appDir)
+            : path.join(config.root, "src/app");
     },
 
     configureServer(server: ViteDevServer) {
         ctx.server = server;
+
+        // handleHotUpdate covers FILE MODIFICATIONS only. Directory operations
+        // (creating, renaming, removing folders like `[+clientes]/`) and file
+        // adds/unlinks are surfaced through the chokidar watcher events. We
+        // listen for them here so that mistakes like creating `[+cliente]/`
+        // and renaming it to `[+clientes]/` rebuild the virtual module without
+        // a manual server restart.
+        const onFileChange = (filePath: string) => {
+            if (isAppPath(filePath) && isRouteFile(filePath)) {
+                triggerReload(server);
+            }
+        };
+        const onDirChange = (dirPath: string) => {
+            if (isAppPath(dirPath)) {
+                triggerReload(server);
+            }
+        };
+        server.watcher.on('add', onFileChange);
+        server.watcher.on('unlink', onFileChange);
+        server.watcher.on('addDir', onDirChange);
+        server.watcher.on('unlinkDir', onDirChange);
 
         // Add virtual module resolution
         return () => {
@@ -127,21 +178,8 @@ const serverHandler: PluginHookHandler = {
         const { file, server } = hmrCtx;
 
         // If a route file was modified, invalidate the virtual module
-        if (isAppFile(file) && isRouteFile(file)) {
-            // Clear the cache
-            ctx.cachedCode = undefined;
-
-            // Invalidate the virtual module for regeneration
-            const mod = server.moduleGraph.getModuleById(RESOLVED_VIRTUAL_MODULE_ID);
-            if (mod) {
-                server.moduleGraph.invalidateModule(mod);
-
-                // Send HMR update
-                server.ws.send({
-                    type: "full-reload",
-                    path: "*",
-                });
-            }
+        if (isAppPath(file) && isRouteFile(file)) {
+            triggerReload(server);
         }
     },
 };

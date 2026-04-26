@@ -4,11 +4,14 @@ A Vite plugin that brings **Next.js App Router** file-based routing to standard 
 
 ## Features
 
-- **File-based routing** - Same conventions as Next.js App Router
-- **HMR support** - Automatic updates when route files change
-- **JIT in development** - Routes generated dynamically without creating files in your source
-- **Optimized for production** - Routes bundled directly for tree-shaking
-- **Nested layouts** - Full support for `layout.tsx` with `<Outlet />`
+- **File-based routing** — Same conventions as Next.js App Router
+- **HMR support** — Automatic updates when route files change
+- **JIT in development** — Routes generated dynamically without creating files in your source
+- **Optimized for production** — Routes bundled directly for tree-shaking
+- **Nested layouts** — Full support for `layout.tsx` with `<Outlet />`
+- **Intercepting routes** — `(.)`, `(..)`, `(..)(..)`, `(...)` markers
+- **Parallel routes** — `@name/` slots resolved via `useSlot(name)` hook
+- **Shared route modules** — `+name/` reusable subtrees invoked with `[+name]` / `(+name)`, with `[-name]` opt-outs
 
 ## Goals
 
@@ -20,7 +23,6 @@ A Vite plugin that brings **Next.js App Router** file-based routing to standard 
 ## Limitations
 
 - Server components are not supported (this is a client-side router)
-- Parallel routes are not implemented
 
 ## Installation
 
@@ -108,33 +110,42 @@ src/app/
 
 ## File Conventions
 
-| File            | Description                                               |
-| --------------- | --------------------------------------------------------- |
-| `page.tsx`      | Page component (required to create a route)               |
-| `layout.tsx`    | Layout that wraps child pages                             |
-| `loading.tsx`   | Loading component (used as Suspense fallback)             |
-| `error.tsx`     | Error boundary component (catches errors in child routes) |
-| `not-found.tsx` | 404 component (catch-all route for unmatched paths)       |
+| File            | Description                                                           |
+| --------------- | --------------------------------------------------------------------- |
+| `page.tsx`      | Page component (required to create a route)                           |
+| `layout.tsx`    | Layout that wraps child pages                                         |
+| `loading.tsx`   | Loading component (used as Suspense fallback)                         |
+| `error.tsx`     | Error boundary (renders inside the layout of the same segment)        |
+| `not-found.tsx` | 404 component (catch-all route for unmatched paths)                   |
+| `default.tsx`   | Inside `@slot/`, fallback rendered when no slot route matches the URL |
 
-## Dynamic Routes
+## Dynamic Routes & Special Directories
 
-| Pattern        | Example       | Result                                 |
-| -------------- | ------------- | -------------------------------------- |
-| `[param]`      | `[id]`        | `:id` - Dynamic parameter              |
-| `[...param]`   | `[...slug]`   | `*` - Catch-all                        |
-| `[[...param]]` | `[[...slug]]` | `*` - Optional catch-all               |
-| `(group)`      | `(auth)`      | Route group (not included in URL path) |
+| Pattern                         | Example                   | Result                                                                                                     |
+| ------------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `[param]`                       | `[id]`                    | `:id` — dynamic parameter                                                                                  |
+| `[...param]`                    | `[...slug]`               | `*` — catch-all                                                                                            |
+| `[[...param]]`                  | `[[...slug]]`             | `*` — optional catch-all                                                                                   |
+| `(group)`                       | `(auth)`                  | Route group (not included in URL)                                                                          |
+| `_private`                      | `_components`             | Ignored (private folder, never produces routes)                                                            |
+| `(.) / (..) / (..)(..) / (...)` | `(..)photo`               | Intercepting route marker (see Intercepting Routes)                                                        |
+| `@name`                         | `@modal`                  | Parallel route slot (see Parallel Routes)                                                                  |
+| `+name`                         | `+customers`, `+[id]`     | Shared route module definition (parametric names allowed)                                                  |
+| `[+name]`                       | `[+customers]`, `[+[id]]` | Bracket invocation of a shared module (adds segment, parametric → `:id`)                                   |
+| `(+name)`                       | `(+customers)`            | Paren invocation of a shared module (transparent)                                                          |
+| `[-name]` or `-name`            | `[-history]`, `-[id]`     | Inside an invocation, omits the matching sub-shared (bracketless form is short-hand, parametric supported) |
+| `props.tsx` at invocation       | `[+customers]/props.tsx`  | Default-export object forwarded to the shared subtree via `useSharedProps()`                               |
 
 ## Intercepting Routes
 
 Following the [Next.js convention](https://nextjs.org/docs/app/api-reference/file-conventions/intercepting-routes), a directory whose name starts with `(.)`, `(..)`, `(..)(..)`, or `(...)` defines a route that is rendered **in place of** another route when navigation originates from the source segment. Direct navigation (URL bar, refresh) renders the regular page; soft navigation that opts in (see below) renders the intercepting page.
 
-| Marker      | Means                                  |
-| ----------- | -------------------------------------- |
-| `(.)`       | Same level as the marker's parent      |
-| `(..)`      | One route segment above                |
-| `(..)(..)`  | Two route segments above               |
-| `(...)`     | The `app` root                         |
+| Marker     | Means                             |
+| ---------- | --------------------------------- |
+| `(.)`      | Same level as the marker's parent |
+| `(..)`     | One route segment above           |
+| `(..)(..)` | Two route segments above          |
+| `(...)`    | The `app` root                    |
 
 The convention is based on **route segments**, so `(group)` directories don't count toward climbing.
 
@@ -174,10 +185,227 @@ When `appRouterBackgroundLocation` is set and matches an intercepting route's so
 - Hard refresh (F5) renders the canonical page. The plugin strips `appRouterBackgroundLocation` from `history.state` on `performance.navigation.type === 'reload'`, so the intercept fires only on soft (link-driven) navigation, mirroring Next.js. Back/forward still re-applies the intercept since the state is preserved on those entries.
 - `loading.tsx` inside an intercepting subtree is honored as the Suspense fallback for the intercepting page.
 
+## Parallel Routes
+
+Following the [Next.js convention](https://nextjs.org/docs/app/api-reference/file-conventions/parallel-routes), a directory named `@name/` declares a **parallel route slot** owned by the segment that contains it (siblings of `layout.tsx`). The slot's tree is matched **independently** against the URL and the matched element is exposed to the layout via the `useSlot(name)` hook.
+
+| File                   | Purpose                                                         |
+| ---------------------- | --------------------------------------------------------------- |
+| `@slot/page.tsx`       | Page rendered when URL matches the slot's owner exactly         |
+| `@slot/<sub>/page.tsx` | Page rendered when URL is `<owner>/<sub>` (or any nested match) |
+| `@slot/default.tsx`    | Fallback rendered when no route in the slot matches the URL     |
+| `@slot/layout.tsx`     | Optional wrapping layout for the slot's tree                    |
+
+### Example
+
+```
+src/app/
+├── @modal/
+│   ├── default.tsx               # rendered when /photo/:id doesn't match
+│   └── photo/[id]/page.tsx       # rendered when URL is /photo/:id
+├── @aside/
+│   └── default.tsx
+├── layout.tsx
+├── page.tsx
+└── photo/[id]/page.tsx           # canonical page at /photo/:id
+```
+
+```tsx
+// src/app/layout.tsx
+import { Outlet } from "react-router-dom";
+import { useSlot } from "vite-plugin-react-app-router/client";
+
+export default function RootLayout() {
+  const modal = useSlot("modal");
+  const aside = useSlot("aside");
+  return (
+    <>
+      <main>
+        <Outlet />
+      </main>
+      {aside}
+      {modal}
+    </>
+  );
+}
+```
+
+### Notes
+
+- Slots are scoped to the segment that owns them: `@drawer/` next to `app/dashboard/layout.tsx` is only injected into that layout. Closer providers win when a name collides.
+- `useSlot(name)` returns a React element (or `null` when no provider registered the slot). Render it where you want the slot to appear.
+- The slot's routes use **absolute** URL patterns internally so `useRoutes` matches against the live location independently of the main route tree.
+- When `useRoutes` returns `null` (no descendant matched the URL) the slot falls back to its `default.tsx`. If neither is present the slot renders nothing.
+
+## Shared Route Modules
+
+A directory named `+name/` defines a **reusable route subtree** that can be invoked at multiple places in the app — useful for mounting the same set of pages under different prefixes (e.g. a `customers` module reused under `/billing/customers` and `/customerservice/customers`).
+
+| Marker                       | Purpose                                                                                                                                                                                         |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `+name/`                     | Definition of the shared subtree (parsed as a regular route tree).                                                                                                                              |
+| `+[param]/`                  | Parametric shared definition — invocation yields a dynamic URL segment (`[id]` → `:id`).                                                                                                        |
+| `[+name]/`                   | Bracket invocation: adds `name` as a URL segment (`/parent/name/...`).                                                                                                                          |
+| `[+[param]]/`                | Bracket invocation of a parametric shared (e.g. `[+[id]]/` → `/parent/:id`).                                                                                                                    |
+| `(+name)/`                   | Paren invocation: transparent (`/parent/...`). Must not have a sibling `page.tsx`.                                                                                                              |
+| `[-name]/` or `-name/`       | Inside an invocation, omit the matching nested `+name/` sub-shared from the graft. The bracketless `-name/` form is accepted as a shorter spelling and is only valid inside an invocation site. |
+| `[-[param]]/` or `-[param]/` | Omit a parametric sub-shared (e.g. `-[id]/` skips `+[id]/` at that depth).                                                                                                                      |
+| `+name/+sub/`                | Nested sub-shared. Auto-included when the parent is invoked unless `[-sub]` opts out.                                                                                                           |
+| `props.tsx`                  | At an invocation site (top-level or any drill-down), default-export forwarded to the shared subtree via `useSharedProps()`. Inner providers merge over outer ones (closer wins).                |
+
+### Visibility
+
+A `+name/` is only visible to **siblings** of the directory that contains it (and their descendants). Place shared modules in a sibling like `(shared)/` to scope them to a parent directory. The closest visible match wins (deepest grandparent).
+
+### Example
+
+```
+src/app/
+├── (shared)/
+│   └── +customers/
+│       ├── layout.tsx
+│       ├── page.tsx                       # /<prefix>/
+│       └── [id]/
+│           ├── page.tsx                   # /<prefix>/:id
+│           └── +history/
+│               └── page.tsx               # /<prefix>/:id/history (sub-shared)
+├── billing/
+│   ├── layout.tsx
+│   └── [+customers]/                       # mounts at /billing/customers/...
+└── customerservice/
+  ├── layout.tsx
+  └── [+customers]/
+    └── [id]/
+      ├── [-history]/                # opt out of +history for this invocation
+      └── page.tsx                   # override +customers/[id]/page.tsx here
+```
+
+This generates routes:
+
+- `/billing/customers`, `/billing/customers/:id`, `/billing/customers/:id/history`
+- `/customerservice/customers`, `/customerservice/customers/:id` (no `history` — omitted; the `:id` page comes from the override file)
+
+### File overrides at the invocation site
+
+Files placed inside `[+name]/` (or any drill-down dir mirroring the shared structure) replace the shared module's files at the matching position. Useful for tweaking a single page without forking the whole module:
+
+```
+[+customers]/
+├── layout.tsx                 # overrides +customers/layout.tsx for THIS invocation
+└── [id]/
+  └── page.tsx               # overrides +customers/[id]/page.tsx
+```
+
+The shared module's other files are still inherited.
+
+### Parametric shared modules
+
+Names follow the same dynamic-segment conventions as regular routes — wrap them in `[…]` to make a shared module parametric:
+
+```
+src/app/
+└── (shared)/
+    └── +entity/
+        ├── page.tsx         # /<prefix>/
+        └── +[id]/
+            ├── page.tsx     # /<prefix>/:id          (parametric sub-shared)
+            └── history/
+              └── page.tsx # /<prefix>/:id/history
+```
+
+Invoke as usual, omit by name (the inner `[id]` is the sub-shared name):
+
+```
+src/app/
+├── foo/[+entity]/                   # /foo/entity, /foo/entity/:id, /foo/entity/:id/history
+└── bar/[+entity]/-[id]/             # /bar/entity only — :id sub-shared skipped (bracketless form)
+```
+
+`[+[id]]/` works similarly for parametric **invocations**: `app/foo/[+[id]]/` mounts the shared at `/foo/:id`.
+
+### Forwarding props with `props.tsx`
+
+A `props.tsx` (or `.ts`/`.jsx`/`.js`) file inside an invocation site exports a default object whose values are made available throughout the grafted subtree via `useSharedProps()`. Useful for parameterising a shared module per invocation without forking it.
+
+```tsx
+// (shared)/+customers/props.tsx — types-only schema (NOT imported by the plugin)
+export interface CustomersProps {
+  apiBase: string;
+  allowDelete: boolean;
+}
+```
+
+```tsx
+// billing/[+customers]/props.tsx — actual values for THIS invocation
+import type { CustomersProps } from "../../(shared)/+customers/props";
+const value: CustomersProps = { apiBase: "/api/billing", allowDelete: false };
+export default value;
+```
+
+```tsx
+// (shared)/+customers/[id]/page.tsx — read at runtime
+import { useSharedProps } from "vite-plugin-react-app-router/client";
+import type { CustomersProps } from "../../props";
+
+export default function CustomerPage() {
+  const { apiBase, allowDelete } = useSharedProps<CustomersProps>();
+  // …
+}
+```
+
+`props.tsx` may also be placed inside drill-down dirs of an invocation (e.g. `[+customers]/[id]/props.tsx`); deeper providers merge **over** outer ones, so the closer values win for collisions while inherited keys still flow through.
+
+The shared module's own `+name/props.tsx` is **types-only** from the plugin's perspective — it is never imported into the bundle. Spread defaults from a regular module if you want them at runtime:
+
+```tsx
+// (shared)/+customers/defaults.ts
+export const defaults = { allowDelete: false };
+
+// billing/[+customers]/props.tsx
+import { defaults } from "../../(shared)/+customers/defaults";
+export default { ...defaults, apiBase: "/api/billing" };
+```
+
+### Reading active sub-shareds at runtime
+
+Components rendered inside a grafted shared module can ask which sub-shareds were enabled at the current invocation site, useful for hiding navigation links to omitted areas:
+
+```tsx
+import {
+  useSharedModule,
+  useSharedSlot,
+} from "vite-plugin-react-app-router/client";
+
+export default function CustomerDetail() {
+  const showHistory = useSharedSlot("history");
+  const info = useSharedModule(); // { name: "customers", activeSubShareds: ["history"] } | null
+  return (
+    <>
+      <h1>{info?.name}</h1>
+      {showHistory && <Link to="history">History</Link>}
+    </>
+  );
+}
+```
+
+### Notes
+
+- `(+name)` (paren) is only valid when the invoker's directory has no sibling `page.tsx` (or the shared has no `pagePath`). The plugin warns when both are present.
+- A `[+name]` invocation requires a visible `+name/` definition; otherwise the plugin warns and the invocation is dropped.
+- Sub-shareds inherit graft URLs by name (bracket-style): `+history/` materialises at `<parentUrl>/history`.
+
 ## Exports
 
 ```tsx
-import { AppRouter, router, routes } from "virtual:app-router";
+import {
+  AppRouter,
+  router,
+  routes,
+  useSlot,
+  useSharedModule,
+  useSharedSlot,
+  useSharedProps,
+} from "vite-plugin-react-app-router/client";
 
 // AppRouter - Ready-to-use component
 <AppRouter />;
@@ -188,6 +416,18 @@ router.navigate("/about");
 
 // routes - Array of RouteObject
 // Useful for customization
+
+// useSlot(name) - retrieves a parallel-route slot's element
+const modal = useSlot("modal");
+
+// useSharedModule() - info about the closest enclosing shared module
+const info = useSharedModule(); // { name, activeSubShareds } | null
+
+// useSharedSlot(subName) - boolean shortcut: is this sub-shared enabled?
+const showHistory = useSharedSlot("history");
+
+// useSharedProps<T>() - merged props.tsx values from the enclosing invocation chain
+const { apiBase } = useSharedProps<{ apiBase: string }>();
 ```
 
 ## Layout Example

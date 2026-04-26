@@ -82,6 +82,7 @@ function generateRoutes(): string {
         rootPage: parsed.rootPage,
         rootError: parsed.rootError,
         rootLoading: parsed.rootLoading,
+        rootSlots: parsed.rootSlots,
     });
     outputDebug(ctx.generatedCode);
     return ctx.generatedCode;

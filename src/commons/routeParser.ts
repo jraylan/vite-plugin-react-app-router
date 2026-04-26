@@ -5,9 +5,40 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import type { RouteNode, ParsedRoute, InterceptedRoute, PluginOptions } from './types.js';
+import type { RouteNode, ParsedRoute, InterceptedRoute, ParallelSlot, SharedModuleDef, PluginOptions } from './types.js';
 
 const DEFAULT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js'];
+
+const IGNORED_DIRS = new Set(['node_modules', '.git', 'components', 'lib', 'utils', 'hooks', 'styles']);
+
+// `name` here is liberal so parametric forms work: `[+[id]]`, `(+[id])`,
+// `[-[id]]`, `+[...slug]`, etc. The inner is later run through parseSegment
+// to derive its URL form.
+/** Matches `[+name]` (bracket invocation: adds segment derived from name). */
+const SHARED_INVOKE_BRACKET_RE = /^\[\+(.+)\]$/;
+/** Matches `(+name)` (paren invocation: transparent — no segment). */
+const SHARED_INVOKE_PAREN_RE = /^\(\+(.+)\)$/;
+/** Matches `[-name]` (bracketed omission — usable anywhere). */
+const SHARED_OMIT_RE = /^\[-(.+)\]$/;
+/** Matches the shorter `-name` omission form, valid only inside invocations. */
+const SHARED_OMIT_BARE_RE = /^-(.+)$/;
+
+/**
+ * Returns the omission target name if `segment` is an omit marker (`[-name]`
+ * or `-name`), otherwise `null`. The bare `-name` form is meant for use
+ * inside an invocation site — `parseInvocationOverrides` is the only caller
+ * that should accept it; the main scan still uses the bracketed form to
+ * avoid colliding with regular dirs whose names happen to start with `-`.
+ */
+function matchOmit(segment: string, allowBare: boolean): string | null {
+    const bracket = segment.match(SHARED_OMIT_RE);
+    if (bracket) return bracket[1]!;
+    if (allowBare) {
+        const bare = segment.match(SHARED_OMIT_BARE_RE);
+        if (bare) return bare[1]!;
+    }
+    return null;
+}
 
 /**
  * Matches Next.js intercepting-route markers at the start of a directory name:
@@ -166,23 +197,400 @@ interface ScanContext {
     routeAncestors: string[];
     /** When inside an intercepting subtree, the source URL where interception originates */
     interceptSource?: string;
+    /** Pre-discovered shared modules used to resolve `[+name]`/`(+name)` invocations. */
+    sharedRegistry?: SharedModuleDef[];
 }
 
 /**
- * Recursively scans the app directory and builds the route tree
+ * Top-level discovery of `+name/` shared modules. Walks `rootDir` and stops
+ * descending whenever a `+name/` is found — its sub-shareds are stored as
+ * placeholders inside its tree (see parseSharedModuleDef), not promoted to
+ * top level.
  */
-export function scanAppDirectory(
+export function discoverSharedModules(
+    rootDir: string,
+    extensions: string[] = DEFAULT_EXTENSIONS
+): SharedModuleDef[] {
+    const result: SharedModuleDef[] = [];
+    walk(rootDir);
+    return result;
+
+    function walk(dir: string): void {
+        if (!fs.existsSync(dir)) return;
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+            if (!e.isDirectory()) continue;
+            if (e.name.startsWith('_') || IGNORED_DIRS.has(e.name)) continue;
+            const full = path.join(dir, e.name);
+            if (e.name.startsWith('+')) {
+                result.push(parseSharedModuleDef(e.name.slice(1), full, dir, extensions));
+                continue; // sub-shareds are nested inside, not top-level
+            }
+            walk(full);
+        }
+    }
+}
+
+function parseSharedModuleDef(
+    name: string,
+    dirPath: string,
+    containerDir: string,
+    extensions: string[]
+): SharedModuleDef {
+    return {
+        name,
+        dirPath,
+        containerDir,
+        layoutPath: findFileWithExtension(dirPath, 'layout', extensions),
+        pagePath: findFileWithExtension(dirPath, 'page', extensions),
+        loadingPath: findFileWithExtension(dirPath, 'loading', extensions),
+        errorPath: findFileWithExtension(dirPath, 'error', extensions),
+        notFoundPath: findFileWithExtension(dirPath, 'not-found', extensions),
+        tree: parseSharedTreeRecursive(dirPath, extensions, ''),
+        subShareds: {},
+    };
+}
+
+/**
+ * Parses the children of a `+name/` directory. Nested `+sub/` directories
+ * become placeholder RouteNodes carrying the full SharedModuleDef so they can
+ * be expanded at graft time.
+ */
+function parseSharedTreeRecursive(
+    dirPath: string,
+    extensions: string[],
+    parentPath: string
+): RouteNode[] {
+    if (!fs.existsSync(dirPath)) return [];
+    const nodes: RouteNode[] = [];
+    for (const e of fs.readdirSync(dirPath, { withFileTypes: true })) {
+        if (!e.isDirectory()) continue;
+        if (e.name.startsWith('_') || IGNORED_DIRS.has(e.name)) continue;
+        const full = path.join(dirPath, e.name);
+
+        if (e.name.startsWith('+')) {
+            const subName = e.name.slice(1);
+            const subDef = parseSharedModuleDef(subName, full, dirPath, extensions);
+            // Placeholder carries its position in the shared subtree as a
+            // relative URL path, so graft-time can prefix the invoker urlBase
+            // and arrive at the right absolute URL for the sub-shared. Run
+            // the inner name through parseSegment so parametric sub-shareds
+            // (`+[id]`, `+[...slug]`) become `:id` / `*` in the URL.
+            const subSegInfo = parseSegment(subName);
+            const subUrlSeg = subSegInfo.routeSegment;
+            const placeholderPath = (
+                parentPath + (subUrlSeg ? '/' + subUrlSeg : '')
+            ).replace(/\/+/g, '/');
+            nodes.push({
+                segment: e.name,
+                path: placeholderPath,
+                isDynamic: subSegInfo.isDynamic,
+                isCatchAll: subSegInfo.isCatchAll,
+                isOptionalCatchAll: subSegInfo.isOptionalCatchAll,
+                isGroup: false,
+                ...(subSegInfo.paramName ? { paramName: subSegInfo.paramName } : {}),
+                children: [],
+                isSharedDef: true,
+                sharedDef: subDef,
+            });
+            continue;
+        }
+
+        const seg = parseSegment(e.name);
+        const routePath = seg.isGroup
+            ? parentPath
+            : parentPath + (seg.routeSegment ? `/${seg.routeSegment}` : '');
+
+        nodes.push({
+            segment: e.name,
+            path: routePath || '/',
+            isDynamic: seg.isDynamic,
+            isCatchAll: seg.isCatchAll,
+            isOptionalCatchAll: seg.isOptionalCatchAll,
+            isGroup: seg.isGroup,
+            paramName: seg.paramName,
+            pagePath: findFileWithExtension(full, 'page', extensions),
+            layoutPath: findFileWithExtension(full, 'layout', extensions),
+            loadingPath: findFileWithExtension(full, 'loading', extensions),
+            errorPath: findFileWithExtension(full, 'error', extensions),
+            notFoundPath: findFileWithExtension(full, 'not-found', extensions),
+            children: parseSharedTreeRecursive(full, extensions, routePath),
+        });
+    }
+    return nodes;
+}
+
+interface InvocationOverrideFiles {
+    pagePath?: string;
+    layoutPath?: string;
+    loadingPath?: string;
+    errorPath?: string;
+    notFoundPath?: string;
+    /** `props.tsx` (or .ts/.jsx/.js) — values forwarded to the shared subtree via useSharedProps(). */
+    propsPath?: string;
+}
+
+interface InvocationOverride extends InvocationOverrideFiles {
+    type: 'omit' | 'drill';
+    /** For `omit`: sub-shared name. For `drill`: directory segment to mirror. */
+    name: string;
+    children?: InvocationOverride[];
+}
+
+interface InvocationOverrideRoot extends InvocationOverrideFiles {
+    children: InvocationOverride[];
+}
+
+/**
+ * Walks the children of a `[+name]/` or `(+name)/` invocation directory,
+ * collecting `[-omit]/` markers, drill-down dirs that mirror the shared
+ * module's structure, and any file overrides (page/layout/loading/error/
+ * not-found) that should replace the shared module's files at the same
+ * position.
+ */
+function parseInvocationOverrideRoot(
+    dirPath: string,
+    extensions: string[]
+): InvocationOverrideRoot {
+    return {
+        ...readOverrideFiles(dirPath, extensions),
+        children: parseInvocationOverrides(dirPath, extensions),
+    };
+}
+
+function parseInvocationOverrides(
+    dirPath: string,
+    extensions: string[]
+): InvocationOverride[] {
+    if (!fs.existsSync(dirPath)) return [];
+    const out: InvocationOverride[] = [];
+    for (const e of fs.readdirSync(dirPath, { withFileTypes: true })) {
+        if (!e.isDirectory()) continue;
+        if (e.name.startsWith('_') || IGNORED_DIRS.has(e.name)) continue;
+        // Inside an invocation we accept the shorter `-name/` form alongside
+        // `[-name]/` — both express the same intent and the bracketed form is
+        // visually noisy for parametric names like `[-[id]]` vs `-[id]`.
+        const omitName = matchOmit(e.name, true);
+        if (omitName) {
+            out.push({ type: 'omit', name: omitName });
+            continue;
+        }
+        const full = path.join(dirPath, e.name);
+        out.push({
+            type: 'drill',
+            name: e.name,
+            ...readOverrideFiles(full, extensions),
+            children: parseInvocationOverrides(full, extensions),
+        });
+    }
+    return out;
+}
+
+function readOverrideFiles(dirPath: string, extensions: string[]): InvocationOverrideFiles {
+    const files: InvocationOverrideFiles = {};
+    const p = findFileWithExtension(dirPath, 'page', extensions);
+    const l = findFileWithExtension(dirPath, 'layout', extensions);
+    const ld = findFileWithExtension(dirPath, 'loading', extensions);
+    const er = findFileWithExtension(dirPath, 'error', extensions);
+    const nf = findFileWithExtension(dirPath, 'not-found', extensions);
+    const pr = findFileWithExtension(dirPath, 'props', extensions);
+    if (p) files.pagePath = p;
+    if (l) files.layoutPath = l;
+    if (ld) files.loadingPath = ld;
+    if (er) files.errorPath = er;
+    if (nf) files.notFoundPath = nf;
+    if (pr) files.propsPath = pr;
+    return files;
+}
+
+function isUnder(child: string, ancestor: string): boolean {
+    if (child === ancestor) return false;
+    const rel = path.relative(ancestor, child);
+    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+/**
+ * Resolves `[+name]`/`(+name)` from the invocation directory by visibility.
+ * Visibility = invocation must be a descendant of the GRANDPARENT of the
+ * `+name/` directory, but *not* under the directory that contains it. Closest
+ * (deepest grandparent) wins.
+ */
+function findVisibleShared(
+    modules: SharedModuleDef[] | undefined,
+    name: string,
+    invocationDir: string
+): SharedModuleDef | undefined {
+    if (!modules) return undefined;
+    let best: SharedModuleDef | undefined;
+    let bestDepth = -1;
+    for (const m of modules) {
+        if (m.name !== name) continue;
+        const visRoot = path.dirname(m.containerDir);
+        if (!isUnder(invocationDir, visRoot)) continue;
+        if (invocationDir === m.containerDir || isUnder(invocationDir, m.containerDir)) continue;
+        const depth = visRoot.split(path.sep).length;
+        if (depth > bestDepth) {
+            best = m;
+            bestDepth = depth;
+        }
+    }
+    return best;
+}
+
+/**
+ * Walks the shared tree, applying invoker overrides and computing absolute
+ * URLs by prefixing the relative paths stored in the shared subtree.
+ *
+ * Sub-shared placeholders are expanded recursively, prefixing the URL with
+ * the sub-shared's name (bracket-style by default). `[-name]/` overrides at
+ * the matching depth omit the corresponding sub-shared. `activeAcc` collects
+ * the names of sub-shareds that ended up active at the current invocation
+ * (used by codegen to feed the runtime SharedModuleProvider).
+ */
+function pickOverride<K extends keyof InvocationOverrideFiles>(
+    override: InvocationOverrideFiles | undefined,
+    base: string | undefined,
+    key: K
+): string | undefined {
+    return override?.[key] ?? base;
+}
+
+function graftSubtree(
+    sharedNodes: RouteNode[],
+    overrides: InvocationOverride[],
+    urlBase: string,
+    activeAcc: string[]
+): RouteNode[] {
+    const omitted = new Set<string>();
+    const drills = new Map<string, InvocationOverride>();
+    for (const ov of overrides) {
+        if (ov.type === 'omit') omitted.add(ov.name);
+        else drills.set(ov.name, ov);
+    }
+
+    const result: RouteNode[] = [];
+    for (const sn of sharedNodes) {
+        if (sn.isSharedDef && sn.sharedDef) {
+            const sub = sn.sharedDef;
+            if (omitted.has(sub.name)) continue;
+            activeAcc.push(sub.name);
+            const subDrill = drills.get('+' + sub.name) || drills.get(sub.name);
+            const subOv = subDrill?.children ?? [];
+            // Placeholder.path = parent-relative URL inside the shared (e.g.
+            // `/:id/historico`). Prefixing with the invoker urlBase yields the
+            // absolute URL where the sub-shared materializes.
+            const subBase = (urlBase + sn.path).replace(/\/+/g, '/');
+            const subActive: string[] = [];
+            const subChildren = graftSubtree(sub.tree, subOv, subBase, subActive);
+            const subPage = pickOverride(subDrill, sub.pagePath, 'pagePath');
+            const subLayout = pickOverride(subDrill, sub.layoutPath, 'layoutPath');
+            const subLoading = pickOverride(subDrill, sub.loadingPath, 'loadingPath');
+            const subError = pickOverride(subDrill, sub.errorPath, 'errorPath');
+            const subNotFound = pickOverride(subDrill, sub.notFoundPath, 'notFoundPath');
+            const subProps = subDrill?.propsPath;
+            result.push({
+                segment: '+' + sub.name,
+                path: subBase || '/',
+                isDynamic: sn.isDynamic,
+                isCatchAll: sn.isCatchAll,
+                isOptionalCatchAll: sn.isOptionalCatchAll,
+                isGroup: false,
+                ...(sn.paramName ? { paramName: sn.paramName } : {}),
+                ...(subLayout ? { layoutPath: subLayout } : {}),
+                ...(subPage ? { pagePath: subPage } : {}),
+                ...(subLoading ? { loadingPath: subLoading } : {}),
+                ...(subError ? { errorPath: subError } : {}),
+                ...(subNotFound ? { notFoundPath: subNotFound } : {}),
+                ...(subProps ? { sharedPropsPath: subProps } : {}),
+                children: subChildren,
+                sharedInvocation: { name: sub.name, activeSubShareds: subActive },
+            });
+            continue;
+        }
+
+        const newPath = (urlBase + sn.path).replace(/\/+/g, '/') || '/';
+        const drill = drills.get(sn.segment);
+        const childOv = drill?.children ?? [];
+        const grafted = graftSubtree(sn.children, childOv, urlBase, activeAcc);
+        // File overrides drilled into the invoker site replace the shared's
+        // files at the matching position. Helps customise individual leaves
+        // without forking the shared module.
+        const ovPage = pickOverride(drill, sn.pagePath, 'pagePath');
+        const ovLayout = pickOverride(drill, sn.layoutPath, 'layoutPath');
+        const ovLoading = pickOverride(drill, sn.loadingPath, 'loadingPath');
+        const ovError = pickOverride(drill, sn.errorPath, 'errorPath');
+        const ovNotFound = pickOverride(drill, sn.notFoundPath, 'notFoundPath');
+        const ovProps = drill?.propsPath;
+        result.push({
+            ...sn,
+            path: newPath,
+            ...(ovPage ? { pagePath: ovPage } : { pagePath: undefined }),
+            ...(ovLayout ? { layoutPath: ovLayout } : { layoutPath: undefined }),
+            ...(ovLoading ? { loadingPath: ovLoading } : { loadingPath: undefined }),
+            ...(ovError ? { errorPath: ovError } : { errorPath: undefined }),
+            ...(ovNotFound ? { notFoundPath: ovNotFound } : { notFoundPath: undefined }),
+            ...(ovProps ? { sharedPropsPath: ovProps } : {}),
+            children: grafted,
+        });
+    }
+    return result;
+}
+
+/**
+ * Materializes a shared module at a single invocation site, returning the
+ * top-level RouteNode that wraps the grafted subtree.
+ *
+ * `rootOverrides` carries top-level file overrides declared at the invocation
+ * directory itself (e.g. `[+clientes]/page.tsx` overriding `+clientes/page.tsx`).
+ */
+function graftSharedModule(
+    shared: SharedModuleDef,
+    urlBase: string,
+    rootOverrides: InvocationOverrideRoot
+): RouteNode {
+    const active: string[] = [];
+    const children = graftSubtree(shared.tree, rootOverrides.children, urlBase, active);
+    const page = rootOverrides.pagePath ?? shared.pagePath;
+    const layout = rootOverrides.layoutPath ?? shared.layoutPath;
+    const loading = rootOverrides.loadingPath ?? shared.loadingPath;
+    const error = rootOverrides.errorPath ?? shared.errorPath;
+    const notFound = rootOverrides.notFoundPath ?? shared.notFoundPath;
+    const props = rootOverrides.propsPath;
+    return {
+        segment: '+' + shared.name,
+        path: urlBase || '/',
+        isDynamic: false,
+        isCatchAll: false,
+        isOptionalCatchAll: false,
+        isGroup: false,
+        ...(layout ? { layoutPath: layout } : {}),
+        ...(page ? { pagePath: page } : {}),
+        ...(loading ? { loadingPath: loading } : {}),
+        ...(error ? { errorPath: error } : {}),
+        ...(notFound ? { notFoundPath: notFound } : {}),
+        ...(props ? { sharedPropsPath: props } : {}),
+        children,
+        sharedInvocation: { name: shared.name, activeSubShareds: active },
+    };
+}
+
+/**
+ * Recursively scans the app directory and builds both the route tree and any
+ * parallel-route slots (`@name/`) declared at this level. Slots are attached
+ * to the node of the directory they belong to (i.e. siblings of `layout.tsx`).
+ */
+export function scanAppDirectoryWithSlots(
     dirPath: string,
     extensions: string[] = DEFAULT_EXTENSIONS,
     parentPath: string = '',
     ctx: ScanContext = { routeAncestors: [] }
-): RouteNode[] {
+): { nodes: RouteNode[]; slots: ParallelSlot[] } {
     if (!fs.existsSync(dirPath)) {
-        return [];
+        return { nodes: [], slots: [] };
     }
 
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
     const nodes: RouteNode[] = [];
+    const slots: ParallelSlot[] = [];
 
     for (const entry of entries) {
         if (!entry.isDirectory()) continue;
@@ -191,19 +599,109 @@ export function scanAppDirectory(
         if (entry.name.startsWith('_')) continue;
 
         // Ignore common directories that are not routes
-        if (['node_modules', '.git', 'components', 'lib', 'utils', 'hooks', 'styles'].includes(entry.name)) {
+        if (IGNORED_DIRS.has(entry.name)) {
+            continue;
+        }
+
+        const fullDirPath = path.join(dirPath, entry.name);
+
+        // `+name/` — shared route module DEFINITION. Discovered separately;
+        // does not contribute to the regular route tree.
+        if (entry.name.startsWith('+')) {
+            continue;
+        }
+
+        // `[-name]/` — omission marker only meaningful inside a `[+name]`/
+        // `(+name)` invocation site (where parseInvocationOverrides handles
+        // it). Stray markers are silently dropped.
+        if (SHARED_OMIT_RE.test(entry.name)) {
+            continue;
+        }
+
+        // `[+name]/` or `(+name)/` — invocation of a shared route module.
+        const bracketMatch = entry.name.match(SHARED_INVOKE_BRACKET_RE);
+        const parenMatch = entry.name.match(SHARED_INVOKE_PAREN_RE);
+        if (bracketMatch || parenMatch) {
+            const invokeName = (bracketMatch || parenMatch)![1]!;
+            const style: 'bracket' | 'paren' = bracketMatch ? 'bracket' : 'paren';
+            const shared = findVisibleShared(ctx.sharedRegistry, invokeName, fullDirPath);
+            if (!shared) {
+                console.warn(
+                    `[vite-plugin-react-app-router] cannot resolve shared module ` +
+                    `"${invokeName}" at ${fullDirPath} — no visible \`+${invokeName}/\` ` +
+                    `definition found among sibling sub-directories.`
+                );
+                continue;
+            }
+            // Paren-style invocations are transparent (no URL segment), so the
+            // shared module's own page would render at the same URL as the
+            // invoker's parent page — a routing conflict in react-router.
+            // Detect and warn so the user can pick a side.
+            if (style === 'paren') {
+                const parentPagePath = findFileWithExtension(dirPath, 'page', extensions);
+                const sharedTopPagePath =
+                    findFileWithExtension(fullDirPath, 'page', extensions) ?? shared.pagePath;
+                if (parentPagePath && sharedTopPagePath) {
+                    console.warn(
+                        `[vite-plugin-react-app-router] (+${invokeName}) at ${fullDirPath} ` +
+                        `overlaps a sibling page.tsx at ${parentPagePath}. ` +
+                        `Paren invocations must not have a sibling page when the shared ` +
+                        `module also defines a page — remove one to resolve the conflict.`
+                    );
+                }
+            }
+            const overridesRoot = parseInvocationOverrideRoot(fullDirPath, extensions);
+            // Parametric invocations (`[+[id]]/`) produce dynamic URL segments
+            // by running the inner name through parseSegment. Static names map
+            // to themselves; `[id]` → `:id`; `[...slug]` → `*`.
+            const invokeSegInfo = parseSegment(invokeName);
+            const invokeUrlSeg = invokeSegInfo.routeSegment;
+            const urlBase = style === 'bracket'
+                ? ((parentPath || '') + (invokeUrlSeg ? '/' + invokeUrlSeg : ''))
+                    .replace(/\/+/g, '/')
+                : (parentPath || '/');
+            const grafted = graftSharedModule(shared, urlBase, overridesRoot);
+            // Reflect the parsed segment kind on the grafted node so the
+            // parent's sort places parametric invocations after static ones.
+            if (style === 'bracket') {
+                grafted.isDynamic = invokeSegInfo.isDynamic;
+                grafted.isCatchAll = invokeSegInfo.isCatchAll;
+                grafted.isOptionalCatchAll = invokeSegInfo.isOptionalCatchAll;
+                if (invokeSegInfo.paramName) grafted.paramName = invokeSegInfo.paramName;
+            }
+            nodes.push(grafted);
+            continue;
+        }
+
+        // Parallel route slot: @name/ — siblings of layout.tsx, owned by the
+        // current directory's segment. The slot is matched independently
+        // against the URL, so its tree starts from the same parentPath.
+        if (entry.name.startsWith('@')) {
+            const slotName = entry.name.slice(1);
+            const slotResult = scanAppDirectoryWithSlots(
+                fullDirPath,
+                extensions,
+                parentPath,
+                { ...ctx }
+            );
+            slots.push({
+                name: slotName,
+                tree: slotResult.nodes,
+                pagePath: findFileWithExtension(fullDirPath, 'page', extensions),
+                layoutPath: findFileWithExtension(fullDirPath, 'layout', extensions),
+                loadingPath: findFileWithExtension(fullDirPath, 'loading', extensions),
+                errorPath: findFileWithExtension(fullDirPath, 'error', extensions),
+                notFoundPath: findFileWithExtension(fullDirPath, 'not-found', extensions),
+                defaultPath: findFileWithExtension(fullDirPath, 'default', extensions),
+            });
             continue;
         }
 
         const segmentInfo = parseSegment(entry.name);
-        const fullDirPath = path.join(dirPath, entry.name);
 
         // Entering a new intercepting subtree (only at the top of an intercept chain)
         if (segmentInfo.interceptLevel !== undefined && !ctx.interceptSource) {
-            // The "parent" path (where this marker dir lives) is the source.
             const sourcePath = parentPath || '/';
-            // Climb from the parent's route ancestors as required by the marker,
-            // then append this marker dir's own segment to form the target base.
             const climbed = resolveInterceptBase(ctx.routeAncestors, segmentInfo.interceptLevel);
             const targetAncestors = segmentInfo.routeSegment
                 ? [...climbed, segmentInfo.routeSegment]
@@ -213,7 +711,10 @@ export function scanAppDirectory(
             const childCtx: ScanContext = {
                 routeAncestors: targetAncestors,
                 interceptSource: sourcePath,
+                sharedRegistry: ctx.sharedRegistry,
             };
+
+            const childResult = scanAppDirectoryWithSlots(fullDirPath, extensions, targetPath, childCtx);
 
             const node: RouteNode = {
                 segment: entry.name,
@@ -226,12 +727,10 @@ export function scanAppDirectory(
                 isIntercepting: true,
                 interceptSource: sourcePath,
                 pagePath: findFileWithExtension(fullDirPath, 'page', extensions),
-                // Layouts/loading/etc. inside an intercepting subtree are
-                // intentionally ignored by the current renderer; the intercept
-                // is rendered without target/source layouts (see codeGenerator).
                 loadingPath: findFileWithExtension(fullDirPath, 'loading', extensions),
                 errorPath: findFileWithExtension(fullDirPath, 'error', extensions),
-                children: scanAppDirectory(fullDirPath, extensions, targetPath, childCtx),
+                children: childResult.nodes,
+                ...(childResult.slots.length > 0 ? { slots: childResult.slots } : {}),
             };
 
             nodes.push(node);
@@ -249,6 +748,12 @@ export function scanAppDirectory(
                 ? [...ctx.routeAncestors, segmentInfo.routeSegment]
                 : ctx.routeAncestors;
 
+        const childResult = scanAppDirectoryWithSlots(fullDirPath, extensions, routePath, {
+            routeAncestors: childAncestors,
+            interceptSource: ctx.interceptSource,
+            sharedRegistry: ctx.sharedRegistry,
+        });
+
         const node: RouteNode = {
             segment: entry.name,
             path: routePath || '/',
@@ -264,23 +769,35 @@ export function scanAppDirectory(
             loadingPath: findFileWithExtension(fullDirPath, 'loading', extensions),
             errorPath: findFileWithExtension(fullDirPath, 'error', extensions),
             notFoundPath: findFileWithExtension(fullDirPath, 'not-found', extensions),
-            children: scanAppDirectory(fullDirPath, extensions, routePath, {
-                routeAncestors: childAncestors,
-                interceptSource: ctx.interceptSource,
-            }),
+            children: childResult.nodes,
+            ...(childResult.slots.length > 0 ? { slots: childResult.slots } : {}),
         };
 
         nodes.push(node);
     }
 
     // Sort: static routes first, dynamic routes second, catch-all last
-    return nodes.sort((a, b) => {
+    nodes.sort((a, b) => {
         if (a.isCatchAll || a.isOptionalCatchAll) return 1;
         if (b.isCatchAll || b.isOptionalCatchAll) return -1;
         if (a.isDynamic && !b.isDynamic) return 1;
         if (!a.isDynamic && b.isDynamic) return -1;
         return a.segment.localeCompare(b.segment);
     });
+    return { nodes, slots };
+}
+
+/**
+ * Backward-compatible wrapper: returns just the route nodes (without the
+ * top-level slot list, which lives on the app root).
+ */
+export function scanAppDirectory(
+    dirPath: string,
+    extensions: string[] = DEFAULT_EXTENSIONS,
+    parentPath: string = '',
+    ctx: ScanContext = { routeAncestors: [] }
+): RouteNode[] {
+    return scanAppDirectoryWithSlots(dirPath, extensions, parentPath, ctx).nodes;
 }
 
 /**
@@ -454,11 +971,19 @@ export function parseAppRouter(options: PluginOptions = {}): {
     rootError?: string;
     rootLoading?: string;
     rootNotFound?: string;
+    /** Parallel-route slots owned by the app root segment. */
+    rootSlots?: ParallelSlot[];
 } {
     const appDir = options.appDir || 'src/app';
     const extensions = options.extensions || DEFAULT_EXTENSIONS;
 
-    const tree = scanAppDirectory(appDir, extensions);
+    const sharedRegistry = discoverSharedModules(appDir, extensions);
+    const scanResult = scanAppDirectoryWithSlots(appDir, extensions, '', {
+        routeAncestors: [],
+        sharedRegistry,
+    });
+    const tree = scanResult.nodes;
+    const rootSlots = scanResult.slots;
     const root = getRootPage(appDir, extensions);
     const { routes, intercepts } = flattenRoutes(
         tree,
@@ -494,5 +1019,6 @@ export function parseAppRouter(options: PluginOptions = {}): {
         rootError: root.errorPath,
         rootLoading: root.loadingPath,
         rootNotFound: root.notFoundPath,
+        ...(rootSlots.length > 0 ? { rootSlots } : {}),
     };
 }
