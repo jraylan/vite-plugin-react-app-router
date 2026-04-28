@@ -222,7 +222,8 @@ export function discoverSharedModules(
             if (e.name.startsWith('_') || IGNORED_DIRS.has(e.name)) continue;
             const full = path.join(dir, e.name);
             if (e.name.startsWith('+')) {
-                result.push(parseSharedModuleDef(e.name.slice(1), full, dir, extensions));
+                const parsed = parseSharedDefName(e.name);
+                result.push(parseSharedModuleDef(parsed, full, dir, extensions));
                 continue; // sub-shareds are nested inside, not top-level
             }
             walk(full);
@@ -230,16 +231,38 @@ export function discoverSharedModules(
     }
 }
 
+/**
+ * Strips the leading `+` from a shared-module dir name and, if present, an
+ * intercept marker prefix (`(.)`, `(..)`, `(...)`, `(..)(..)`, ...). Returns
+ * the bare template name plus the climb level (when the template was declared
+ * as intercept-flavored).
+ */
+function parseSharedDefName(rawDirName: string): { name: string; level?: 'same' | 'root' | number } {
+    const inner = rawDirName.slice(1); // drop leading '+'
+    const m = inner.match(INTERCEPTING_MARKER_RE);
+    if (m) {
+        const marker = m[1]!;
+        const name = m[2]!;
+        let level: 'same' | 'root' | number;
+        if (marker === '(.)') level = 'same';
+        else if (marker === '(...)') level = 'root';
+        else level = (marker.match(/\(\.\.\)/g) || []).length;
+        return { name, level };
+    }
+    return { name: inner };
+}
+
 function parseSharedModuleDef(
-    name: string,
+    parsed: { name: string; level?: 'same' | 'root' | number },
     dirPath: string,
     containerDir: string,
     extensions: string[]
 ): SharedModuleDef {
     return {
-        name,
+        name: parsed.name,
         dirPath,
         containerDir,
+        ...(parsed.level !== undefined ? { interceptLevel: parsed.level } : {}),
         layoutPath: findFileWithExtension(dirPath, 'layout', extensions),
         pagePath: findFileWithExtension(dirPath, 'page', extensions),
         loadingPath: findFileWithExtension(dirPath, 'loading', extensions),
@@ -268,8 +291,9 @@ function parseSharedTreeRecursive(
         const full = path.join(dirPath, e.name);
 
         if (e.name.startsWith('+')) {
-            const subName = e.name.slice(1);
-            const subDef = parseSharedModuleDef(subName, full, dirPath, extensions);
+            const parsed = parseSharedDefName(e.name);
+            const subName = parsed.name;
+            const subDef = parseSharedModuleDef(parsed, full, dirPath, extensions);
             // Placeholder carries its position in the shared subtree as a
             // relative URL path, so graft-time can prefix the invoker urlBase
             // and arrive at the right absolute URL for the sub-shared. Run
@@ -460,34 +484,102 @@ function graftSubtree(
     urlBase: string,
     activeAcc: string[]
 ): RouteNode[] {
+    // `omitted`           — drops both canonical AND intercept variants for the
+    //                       given name (`[-id]/` or `-id/`).
+    // `omittedInterceptOnly` — drops only the intercept variant, leaving the
+    //                       canonical mount alone (`[-(.)id]/`, `[-(..)id]/`,
+    //                       `[-(...)id]/`, etc.). Useful when a mount opts out
+    //                       of the drawer overlay but still wants the regular
+    //                       full-screen detail page.
     const omitted = new Set<string>();
+    const omittedInterceptOnly = new Set<string>();
     const drills = new Map<string, InvocationOverride>();
     for (const ov of overrides) {
-        if (ov.type === 'omit') omitted.add(ov.name);
-        else drills.set(ov.name, ov);
+        if (ov.type === 'omit') {
+            const im = ov.name.match(INTERCEPTING_MARKER_RE);
+            if (im) omittedInterceptOnly.add(im[2]!);
+            else omitted.add(ov.name);
+        } else {
+            drills.set(ov.name, ov);
+        }
+    }
+
+    // Pair canonical (non-intercept) with intercept variants of the same name.
+    // Intercept-flavored sub-shareds borrow the canonical sibling's tree as
+    // their children template, so URLs like `/clientes/:id/info` keep the
+    // overlay alive even though the intercept template (`+(.)[id]/`) only
+    // declares its own layout + page.
+    const canonicalSiblingByName = new Map<string, SharedModuleDef>();
+    for (const sn of sharedNodes) {
+        if (
+            sn.isSharedDef &&
+            sn.sharedDef &&
+            sn.sharedDef.interceptLevel === undefined
+        ) {
+            canonicalSiblingByName.set(sn.sharedDef.name, sn.sharedDef);
+        }
     }
 
     const result: RouteNode[] = [];
     for (const sn of sharedNodes) {
         if (sn.isSharedDef && sn.sharedDef) {
             const sub = sn.sharedDef;
+            const isIntercept = sub.interceptLevel !== undefined;
             if (omitted.has(sub.name)) continue;
-            activeAcc.push(sub.name);
+            if (isIntercept && omittedInterceptOnly.has(sub.name)) continue;
+            // Track active sub-shareds for the parent invocation's
+            // SharedModuleProvider. Push only on the canonical variant when
+            // a canonical sibling exists (to avoid double-counting the same
+            // name); otherwise push the intercept name so a standalone
+            // intercept template still surfaces via useSharedSlot().
+            const hasCanonicalSibling = isIntercept && canonicalSiblingByName.has(sub.name);
+            if (!isIntercept || !hasCanonicalSibling) activeAcc.push(sub.name);
             const subDrill = drills.get('+' + sub.name) || drills.get(sub.name);
             const subOv = subDrill?.children ?? [];
-            // Placeholder.path = parent-relative URL inside the shared (e.g.
-            // `/:id/historico`). Prefixing with the invoker urlBase yields the
-            // absolute URL where the sub-shared materializes.
-            const subBase = (urlBase + sn.path).replace(/\/+/g, '/');
+
+            // If the sub-shared was declared with an intercept marker
+            // (`+(.)[id]/`, `+(..)foo/`, ...), compute its target URL by
+            // climbing the invoker's URL ancestors instead of just appending
+            // the sub-shared's segment. The grafted subtree is then marked as
+            // intercepting with sourcePath=urlBase so it surfaces through the
+            // intercepts collector (BG outlet stays mounted at the parent
+            // shared's invocation URL).
+            let subBase: string;
+            if (isIntercept) {
+                const ancestors = urlBase
+                    .replace(/^\//, '')
+                    .split('/')
+                    .filter(Boolean);
+                const climbed = resolveInterceptBase(ancestors, sub.interceptLevel!);
+                const subSeg = parseSegment(sub.name).routeSegment;
+                const targetAncestors = subSeg ? [...climbed, subSeg] : climbed;
+                subBase = joinUrlSegments(targetAncestors);
+            } else {
+                // Placeholder.path = parent-relative URL inside the shared
+                // (e.g. `/:id/historico`). Prefixing with the invoker urlBase
+                // yields the absolute URL where the sub-shared materializes.
+                subBase = (urlBase + sn.path).replace(/\/+/g, '/');
+            }
+
+            // Children template: for intercept variants paired with a
+            // canonical sibling, use the canonical's tree so sub-shareds
+            // (`+info/`, `+atendimentos/`, ...) appear under the overlay's
+            // root layout. Files (layout/page/loading/error/not-found) are
+            // taken from the intercept template only — the canonical layout
+            // is intentionally dropped so the overlay's drawer shell isn't
+            // wrapped around another full-screen layout.
+            const childrenTemplate = isIntercept
+                ? (canonicalSiblingByName.get(sub.name)?.tree ?? sub.tree)
+                : sub.tree;
             const subActive: string[] = [];
-            const subChildren = graftSubtree(sub.tree, subOv, subBase, subActive);
+            const subChildren = graftSubtree(childrenTemplate, subOv, subBase, subActive);
             const subPage = pickOverride(subDrill, sub.pagePath, 'pagePath');
             const subLayout = pickOverride(subDrill, sub.layoutPath, 'layoutPath');
             const subLoading = pickOverride(subDrill, sub.loadingPath, 'loadingPath');
             const subError = pickOverride(subDrill, sub.errorPath, 'errorPath');
             const subNotFound = pickOverride(subDrill, sub.notFoundPath, 'notFoundPath');
             const subProps = subDrill?.propsPath;
-            result.push({
+            const subNode: RouteNode = {
                 segment: '+' + sub.name,
                 path: subBase || '/',
                 isDynamic: sn.isDynamic,
@@ -503,7 +595,14 @@ function graftSubtree(
                 ...(subProps ? { sharedPropsPath: subProps } : {}),
                 children: subChildren,
                 sharedInvocation: { name: sub.name, activeSubShareds: subActive },
-            });
+            };
+            if (isIntercept) {
+                // Source = the URL where the parent shared is mounted (the
+                // list page from the user's perspective). markInterceptingSubtree
+                // recurses through the grafted children too.
+                markInterceptingSubtree(subNode, urlBase || '/');
+            }
+            result.push(subNode);
             continue;
         }
 
@@ -542,6 +641,18 @@ function graftSubtree(
  * `rootOverrides` carries top-level file overrides declared at the invocation
  * directory itself (e.g. `[+clientes]/page.tsx` overriding `+clientes/page.tsx`).
  */
+/**
+ * Recursively flips a grafted subtree into intercept mode by stamping every
+ * node with `isIntercepting` + `interceptSource`. flattenRoutes then routes
+ * each page node through collectIntercepts instead of the regular routes
+ * table — letting a shared route module be mounted as an interception.
+ */
+function markInterceptingSubtree(node: RouteNode, sourcePath: string): void {
+    node.isIntercepting = true;
+    node.interceptSource = sourcePath;
+    for (const c of node.children) markInterceptingSubtree(c, sourcePath);
+}
+
 function graftSharedModule(
     shared: SharedModuleDef,
     urlBase: string,
@@ -618,12 +729,29 @@ export function scanAppDirectoryWithSlots(
             continue;
         }
 
-        // `[+name]/` or `(+name)/` — invocation of a shared route module.
-        const bracketMatch = entry.name.match(SHARED_INVOKE_BRACKET_RE);
-        const parenMatch = entry.name.match(SHARED_INVOKE_PAREN_RE);
+        // `[+name]/` / `(+name)/` invocations — possibly prefixed with an
+        // intercept marker (`(.)`/`(..)`/`(...)`/etc.) so a shared module can
+        // be mounted as an interception, e.g. `feed/(..)[+photoModal]/`
+        // intercepts the URL produced by `+photoModal` from the `/feed` source.
+        const interceptPrefixMatch = entry.name.match(INTERCEPTING_MARKER_RE);
+        const invocationCandidate = interceptPrefixMatch ? interceptPrefixMatch[2]! : entry.name;
+        const bracketMatch = invocationCandidate.match(SHARED_INVOKE_BRACKET_RE);
+        const parenMatch = invocationCandidate.match(SHARED_INVOKE_PAREN_RE);
         if (bracketMatch || parenMatch) {
             const invokeName = (bracketMatch || parenMatch)![1]!;
             const style: 'bracket' | 'paren' = bracketMatch ? 'bracket' : 'paren';
+
+            // Resolve the intercept marker (if any) into a climb level so we
+            // can compute the target URL the same way ordinary intercepting
+            // routes do.
+            let interceptLevel: InterceptLevel | undefined;
+            if (interceptPrefixMatch) {
+                const m = interceptPrefixMatch[1]!;
+                if (m === '(.)') interceptLevel = 'same';
+                else if (m === '(...)') interceptLevel = 'root';
+                else interceptLevel = (m.match(/\(\.\.\)/g) || []).length;
+            }
+
             const shared = findVisibleShared(ctx.sharedRegistry, invokeName, fullDirPath);
             if (!shared) {
                 console.warn(
@@ -633,11 +761,21 @@ export function scanAppDirectoryWithSlots(
                 );
                 continue;
             }
+            // Template-side fallback: when the consumer did not prefix the
+            // invocation but the template itself was declared as intercept-
+            // flavored (`+(.)foo/`, `+(..)foo/`, ...), inherit the template's
+            // climb level so the consumer can keep its short syntax.
+            if (interceptLevel === undefined && shared.interceptLevel !== undefined) {
+                interceptLevel = shared.interceptLevel;
+            }
+            const isInterceptInvocation = interceptLevel !== undefined;
             // Paren-style invocations are transparent (no URL segment), so the
             // shared module's own page would render at the same URL as the
             // invoker's parent page — a routing conflict in react-router.
-            // Detect and warn so the user can pick a side.
-            if (style === 'paren') {
+            // Detect and warn so the user can pick a side. (Skipped for
+            // intercepting paren invocations since the source page lives at
+            // a different URL than the target.)
+            if (style === 'paren' && !isInterceptInvocation) {
                 const parentPagePath = findFileWithExtension(dirPath, 'page', extensions);
                 const sharedTopPagePath =
                     findFileWithExtension(fullDirPath, 'page', extensions) ?? shared.pagePath;
@@ -656,18 +794,37 @@ export function scanAppDirectoryWithSlots(
             // to themselves; `[id]` → `:id`; `[...slug]` → `*`.
             const invokeSegInfo = parseSegment(invokeName);
             const invokeUrlSeg = invokeSegInfo.routeSegment;
-            const urlBase = style === 'bracket'
-                ? ((parentPath || '') + (invokeUrlSeg ? '/' + invokeUrlSeg : ''))
-                    .replace(/\/+/g, '/')
-                : (parentPath || '/');
+
+            let urlBase: string;
+            if (isInterceptInvocation) {
+                // Climb the route ancestors per the marker, then append the
+                // invocation's own segment when bracket-style.
+                const climbed = resolveInterceptBase(ctx.routeAncestors, interceptLevel!);
+                const targetAncestors = style === 'bracket' && invokeUrlSeg
+                    ? [...climbed, invokeUrlSeg]
+                    : climbed;
+                urlBase = joinUrlSegments(targetAncestors);
+            } else {
+                urlBase = style === 'bracket'
+                    ? ((parentPath || '') + (invokeUrlSeg ? '/' + invokeUrlSeg : ''))
+                        .replace(/\/+/g, '/')
+                    : (parentPath || '/');
+            }
             const grafted = graftSharedModule(shared, urlBase, overridesRoot);
             // Reflect the parsed segment kind on the grafted node so the
             // parent's sort places parametric invocations after static ones.
-            if (style === 'bracket') {
+            if (style === 'bracket' && !isInterceptInvocation) {
                 grafted.isDynamic = invokeSegInfo.isDynamic;
                 grafted.isCatchAll = invokeSegInfo.isCatchAll;
                 grafted.isOptionalCatchAll = invokeSegInfo.isOptionalCatchAll;
                 if (invokeSegInfo.paramName) grafted.paramName = invokeSegInfo.paramName;
+            }
+            if (isInterceptInvocation) {
+                // Mark the whole grafted subtree as intercepting so flatten
+                // routes them through the intercepts collector instead of
+                // mounting them as canonical pages.
+                const sourcePath = parentPath || '/';
+                markInterceptingSubtree(grafted, sourcePath);
             }
             nodes.push(grafted);
             continue;
@@ -860,12 +1017,17 @@ export function flattenRoutes(
     }
 
     for (const node of nodes) {
-        // Intercepting subtree: collect intercept entries from the page nodes
-        // inside it, keyed by source/target. The source's loading is the only
-        // contextual data we carry; layouts are intentionally not applied to
-        // intercepts (the intercept page is rendered as a leaf overlay).
+        // Intercepting subtree: emit a single intercept entry whose subtree is
+        // the entire grafted RouteNode. The codegen treats each entry as a
+        // self-contained route table (its own layout/page + sub-shared
+        // children with absolute URLs) so a tab-style overlay keeps the
+        // drawer mounted while sub-routes change.
         if (node.isIntercepting && node.interceptSource !== undefined) {
-            collectIntercepts(node, node.interceptSource, context.loadingPath, intercepts);
+            intercepts.push({
+                sourcePattern: node.interceptSource,
+                targetPattern: node.path || '/',
+                subtree: node,
+            });
             continue;
         }
 
@@ -907,29 +1069,6 @@ export function flattenRoutes(
     }
 
     return { routes, intercepts };
-}
-
-/**
- * Walks an intercepting subtree and pushes one InterceptedRoute per page.
- */
-function collectIntercepts(
-    node: RouteNode,
-    sourcePattern: string,
-    inheritedLoading: string | undefined,
-    out: InterceptedRoute[]
-): void {
-    const loadingPath = node.loadingPath || inheritedLoading;
-    if (node.pagePath) {
-        out.push({
-            sourcePattern,
-            targetPattern: node.path || '/',
-            pagePath: node.pagePath,
-            loadingPath,
-        });
-    }
-    for (const child of node.children) {
-        collectIntercepts(child, sourcePattern, loadingPath, out);
-    }
 }
 
 /**

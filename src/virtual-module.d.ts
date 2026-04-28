@@ -15,9 +15,11 @@ declare module 'virtual:app-router' {
     export const AppRouter: FC;
 
     /**
-     * Router instance created with createBrowserRouter
+     * Router instance created with createBrowserRouter.
+     * `null` in intercept mode — that build path uses <BrowserRouter> +
+     * useRoutes() instead of the data router, so no instance exists.
      */
-    export const router: ReturnType<typeof createBrowserRouter>;
+    export const router: ReturnType<typeof createBrowserRouter> | null;
 
     /**
      * Array of route objects for custom use

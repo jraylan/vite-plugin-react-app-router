@@ -184,6 +184,11 @@ When `appRouterBackgroundLocation` is set and matches an intercepting route's so
 - Intercepting pages render **in place of** the target page (no parallel slot). If you want the source page to remain visible behind a modal, render the modal yourself with a portal — `useLocation().state?.appRouterBackgroundLocation` tells you which page the user came from.
 - Hard refresh (F5) renders the canonical page. The plugin strips `appRouterBackgroundLocation` from `history.state` on `performance.navigation.type === 'reload'`, so the intercept fires only on soft (link-driven) navigation, mirroring Next.js. Back/forward still re-applies the intercept since the state is preserved on those entries.
 - `loading.tsx` inside an intercepting subtree is honored as the Suspense fallback for the intercepting page.
+- **BG outlet stays mounted.** When at least one `(.)`/`(..)` intercept is declared anywhere in the app, the plugin emits a `BrowserRouter` + `useRoutes` AppRouter (instead of `createBrowserRouter` + `RouterProvider`). The InnerRouter passes `state.appRouterBackgroundLocation` to `useRoutes` when the source+target pair matches, so React keeps the BG component instances (same DOM nodes, same component state) while the overlay's own `useRoutes` runs the intercept's route subtree against the live location. Trade-off: the `router` export is `null` in intercept mode (no `createBrowserRouter` instance) — use `useNavigate()` from `react-router-dom` for programmatic navigation.
+- **Shared route modules as intercepts.** An intercept marker can prefix a shared invocation: `feed/(..)[+photo]/` mounts the `+photo/` template as an interception with source `/feed` and target derived by climbing route ancestors (here `/photo/:id` if `+photo/[id]/page.tsx` exists). Each intercept entry carries a full route subtree (intercept template's layout + page wrapping the paired canonical's sub-shareds), so tab-style navigation inside the overlay keeps the shell mounted across `:param`/sub-route changes. Match the shared name to the desired URL segment — `[+photo]` adds `photo`, `[+photoModal]` adds `photoModal`. Paren form `(..)(+photo)/` works too (transparent — no segment added at the climbed level).
+- **Intercept-flavored template definitions.** A template can pre-declare its climb level by embedding the intercept marker in its definition name: `+(.)foo/`, `+(..)foo/`, `+(...)foo/`, `+(..)(..)foo/`. When a consumer invokes the template without a prefix (`[+foo]/`), the template's level is inherited and the subtree mounts as an interception. Consumer-side prefix `(.)[+foo]/` still works and overrides the template level. Removal/parametric/`props.tsx`/etc. rules are unchanged.
+- **Sibling intercept variants pair automatically.** Declaring `+(.)<name>/` next to `+<name>/` inside the same parent shared module produces an intercept variant of the canonical sub-shared. The intercept's `layout.tsx` + `page.tsx` replace the canonical's at the root of the overlay subtree, but the canonical's sub-shareds (`+info/`, `+atendimentos/`, ...) are inherited as children — so `/clientes/:id/info` still renders inside the overlay's layout shell when navigated soft. Opt out per mount with the intercept-only omit marker `[-(.)<name>]/` (the bare `[-<name>]/` still drops both variants).
+- **Provider hoisting.** Providers above the route tree (`QueryClientProvider`, theme, i18n, ...) belong above `<AppRouter />` in `main.tsx`, **not** inside `app/layout.tsx`. The intercept overlay is rendered as a Fragment sibling of the canonical route tree (so the BG outlet stays mounted across the URL change), so it does not inherit context provided inside `app/layout.tsx`. Hoisting providers to the AppRouter's parent ensures both the canonical and overlay subtrees see them.
 
 ## Parallel Routes
 
@@ -412,6 +417,8 @@ import {
 
 // router - createBrowserRouter instance
 // Useful for programmatic navigation
+// NOT generated when intercepts are declared (BrowserRouter mode is used).
+// In that case use useNavigate() from react-router-dom inside components.
 router.navigate("/about");
 
 // routes - Array of RouteObject

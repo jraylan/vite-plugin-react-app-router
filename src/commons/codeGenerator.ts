@@ -12,8 +12,6 @@ import { pathToIdentifier } from './routeParser.js';
 
 /** State key on history.state used to signal an intercepted navigation. */
 const BACKGROUND_LOCATION_KEY = 'appRouterBackgroundLocation';
-/** Internal name for the resolver function in the generated module. */
-const INTERCEPT_RESOLVER_NAME = '__appRouterInterceptResolver__';
 
 // Handle both ESM and CJS default exports
 const generate = typeof _generate === 'function' ? _generate : (_generate as { default: typeof _generate }).default;
@@ -152,8 +150,6 @@ interface CollectedImports {
     loadingMap: Map<string, string>;
     errorMap: Map<string, string>;
     notFoundMap: Map<string, string>;
-    /** Map of intercept page path → component name */
-    interceptMap: Map<string, string>;
 }
 
 /**
@@ -172,31 +168,36 @@ function collectImports(
     const loadingMap = new Map<string, string>();
     const errorMap = new Map<string, string>();
     const notFoundMap = new Map<string, string>();
-    const interceptMap = new Map<string, string>();
 
     let pageIndex = 0;
     let layoutIndex = 0;
     let loadingIndex = 0;
     let errorIndex = 0;
     let notFoundIndex = 0;
-    let interceptIndex = 0;
     const seenLayouts = new Set<string>();
     const seenLoading = new Set<string>();
     const seenError = new Set<string>();
     const seenNotFound = new Set<string>();
-    const seenIntercepts = new Set<string>();
 
     const hasIntercepts = intercepts.length > 0;
 
-    // Import from react-router-dom (add useLocation/matchPath when intercepts exist)
-    const rrSpecifiers: t.ImportSpecifier[] = [
-        createNamedImport('createBrowserRouter'),
-        createNamedImport('RouterProvider'),
-        createNamedImport('Outlet'),
-    ];
+    // Import from react-router-dom. Two router shapes:
+    //   - intercept mode → BrowserRouter + useRoutes (preserves BG instances)
+    //   - regular mode  → createBrowserRouter + RouterProvider (data router)
+    const rrSpecifiers: t.ImportSpecifier[] = [createNamedImport('Outlet')];
     if (hasIntercepts) {
+        rrSpecifiers.push(createNamedImport('BrowserRouter'));
+        rrSpecifiers.push(createNamedImport('useRoutes'));
         rrSpecifiers.push(createNamedImport('useLocation'));
         rrSpecifiers.push(createNamedImport('matchPath'));
+        // Routes/Route wrap the intercept overlay so the intercepting page
+        // sees its `:param` segments via useParams(). Without a parent <Route>
+        // there is no match record and useParams returns `{}`.
+        rrSpecifiers.push(createNamedImport('Routes'));
+        rrSpecifiers.push(createNamedImport('Route'));
+    } else {
+        rrSpecifiers.push(createNamedImport('createBrowserRouter'));
+        rrSpecifiers.push(createNamedImport('RouterProvider'));
     }
     statements.push(createImportDeclaration(rrSpecifiers, 'react-router-dom'));
 
@@ -331,204 +332,70 @@ function collectImports(
         notFoundMap.set(rootNotFound, notFoundName);
     }
 
-    // Import intercept page components
-    for (const ic of intercepts) {
-        if (seenIntercepts.has(ic.pagePath)) continue;
-        seenIntercepts.add(ic.pagePath);
-        const name = `Intercept${interceptIndex++}`;
-        const importPath = normalizeImportPath(ic.pagePath, rootDir);
-        if (lazy) {
-            statements.push(createLazyImport(name, importPath));
-        } else {
-            statements.push(
-                createImportDeclaration([createDefaultImport(name)], `/${importPath}`)
-            );
-        }
-        interceptMap.set(ic.pagePath, name);
+    // Walk each intercept's subtree to import its page/layout/loading/error
+    // /not-found files. Intercept routes are no longer flat-per-leaf — each
+    // entry carries a full RouteNode subtree so the overlay can mount tab-
+    // style navigation under its own layout.
+    const seenPage = new Set<string>(componentMap.keys());
+    const importPage = (filePath: string): void => {
+        if (seenPage.has(filePath)) return;
+        seenPage.add(filePath);
+        const name = `Page${generateImportName('', filePath, pageIndex++)}`;
+        const importPath = normalizeImportPath(filePath, rootDir);
+        if (lazy) statements.push(createLazyImport(name, importPath));
+        else statements.push(createImportDeclaration([createDefaultImport(name)], `/${importPath}`));
+        componentMap.set(filePath, name);
+    };
+    const importLayout = (filePath: string): void => {
+        if (seenLayouts.has(filePath)) return;
+        seenLayouts.add(filePath);
+        const name = `Layout${layoutIndex++}`;
+        const importPath = normalizeImportPath(filePath, rootDir);
+        if (lazy) statements.push(createLazyImport(name, importPath));
+        else statements.push(createImportDeclaration([createDefaultImport(name)], `/${importPath}`));
+        layoutMap.set(filePath, name);
+    };
+    const importLoading = (filePath: string): void => {
+        if (seenLoading.has(filePath)) return;
+        seenLoading.add(filePath);
+        const name = `Loading${loadingIndex++}`;
+        const importPath = normalizeImportPath(filePath, rootDir);
+        if (lazy) statements.push(createLazyImport(name, importPath));
+        else statements.push(createImportDeclaration([createDefaultImport(name)], `/${importPath}`));
+        loadingMap.set(filePath, name);
+    };
+    const importError = (filePath: string): void => {
+        if (seenError.has(filePath)) return;
+        seenError.add(filePath);
+        const name = `ErrorBoundary${errorIndex++}`;
+        const importPath = normalizeImportPath(filePath, rootDir);
+        if (lazy) statements.push(createLazyImport(name, importPath));
+        else statements.push(createImportDeclaration([createDefaultImport(name)], `/${importPath}`));
+        errorMap.set(filePath, name);
+    };
+    const importNotFound = (filePath: string): void => {
+        if (seenNotFound.has(filePath)) return;
+        seenNotFound.add(filePath);
+        const name = `NotFound${notFoundIndex++}`;
+        const importPath = normalizeImportPath(filePath, rootDir);
+        if (lazy) statements.push(createLazyImport(name, importPath));
+        else statements.push(createImportDeclaration([createDefaultImport(name)], `/${importPath}`));
+        notFoundMap.set(filePath, name);
+    };
 
-        // Source loading components ride on top of regular loading imports.
-        if (ic.loadingPath && !seenLoading.has(ic.loadingPath)) {
-            seenLoading.add(ic.loadingPath);
-            const loadingName = `Loading${loadingIndex++}`;
-            const loadingImportPath = normalizeImportPath(ic.loadingPath, rootDir);
-            if (lazy) {
-                statements.push(createLazyImport(loadingName, loadingImportPath));
-            } else {
-                statements.push(
-                    createImportDeclaration([createDefaultImport(loadingName)], `/${loadingImportPath}`)
-                );
-            }
-            loadingMap.set(ic.loadingPath, loadingName);
-        }
+    function walkInterceptNode(node: RouteNode): void {
+        if (node.pagePath) importPage(node.pagePath);
+        if (node.layoutPath) importLayout(node.layoutPath);
+        if (node.loadingPath) importLoading(node.loadingPath);
+        if (node.errorPath) importError(node.errorPath);
+        if (node.notFoundPath) importNotFound(node.notFoundPath);
+        for (const c of node.children) walkInterceptNode(c);
     }
+    for (const ic of intercepts) walkInterceptNode(ic.subtree);
 
-    return { statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap, interceptMap };
+    return { statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap };
 }
 
-/**
- * Builds the AST for the intercept resolver function:
- *
- *   function __appRouterInterceptResolver__({ regular, intercepts }) {
- *       const location = useLocation();
- *       const state = location.state;
- *       const bg = state && state.appRouterBackgroundLocation;
- *       if (bg && bg.pathname && intercepts) {
- *           for (let i = 0; i < intercepts.length; i++) {
- *               const ic = intercepts[i];
- *               if (matchPath({ path: ic.source, end: false }, bg.pathname)) {
- *                   return ic.element;
- *               }
- *           }
- *       }
- *       return regular;
- *   }
- */
-function createInterceptResolverDeclaration(): t.FunctionDeclaration {
-    const propsParam = t.objectPattern([
-        t.objectProperty(t.identifier('regular'), t.identifier('regular'), false, true),
-        t.objectProperty(t.identifier('intercepts'), t.identifier('intercepts'), false, true),
-    ]);
-
-    const locationDecl = t.variableDeclaration('const', [
-        t.variableDeclarator(
-            t.identifier('location'),
-            t.callExpression(t.identifier('useLocation'), [])
-        ),
-    ]);
-
-    const stateDecl = t.variableDeclaration('const', [
-        t.variableDeclarator(
-            t.identifier('state'),
-            t.memberExpression(t.identifier('location'), t.identifier('state'))
-        ),
-    ]);
-
-    const bgDecl = t.variableDeclaration('const', [
-        t.variableDeclarator(
-            t.identifier('bg'),
-            t.logicalExpression(
-                '&&',
-                t.identifier('state'),
-                t.memberExpression(t.identifier('state'), t.identifier(BACKGROUND_LOCATION_KEY))
-            )
-        ),
-    ]);
-
-    // matchPath({ path: ic.source, end: false }, bg.pathname)
-    const matchCall = t.callExpression(t.identifier('matchPath'), [
-        t.objectExpression([
-            t.objectProperty(
-                t.identifier('path'),
-                t.memberExpression(t.identifier('ic'), t.identifier('source'))
-            ),
-            t.objectProperty(t.identifier('end'), t.booleanLiteral(false)),
-        ]),
-        t.memberExpression(t.identifier('bg'), t.identifier('pathname')),
-    ]);
-
-    const loopBody = t.blockStatement([
-        t.variableDeclaration('const', [
-            t.variableDeclarator(
-                t.identifier('ic'),
-                t.memberExpression(
-                    t.identifier('intercepts'),
-                    t.identifier('i'),
-                    true
-                )
-            ),
-        ]),
-        t.ifStatement(
-            matchCall,
-            t.blockStatement([
-                t.returnStatement(
-                    t.memberExpression(t.identifier('ic'), t.identifier('element'))
-                ),
-            ])
-        ),
-    ]);
-
-    const forStmt = t.forStatement(
-        t.variableDeclaration('let', [
-            t.variableDeclarator(t.identifier('i'), t.numericLiteral(0)),
-        ]),
-        t.binaryExpression(
-            '<',
-            t.identifier('i'),
-            t.memberExpression(t.identifier('intercepts'), t.identifier('length'))
-        ),
-        t.updateExpression('++', t.identifier('i')),
-        loopBody
-    );
-
-    const guard = t.ifStatement(
-        t.logicalExpression(
-            '&&',
-            t.logicalExpression(
-                '&&',
-                t.identifier('bg'),
-                t.memberExpression(t.identifier('bg'), t.identifier('pathname'))
-            ),
-            t.identifier('intercepts')
-        ),
-        t.blockStatement([forStmt])
-    );
-
-    const body = t.blockStatement([
-        locationDecl,
-        stateDecl,
-        bgDecl,
-        guard,
-        t.returnStatement(t.identifier('regular')),
-    ]);
-
-    return t.functionDeclaration(
-        t.identifier(INTERCEPT_RESOLVER_NAME),
-        [propsParam],
-        body
-    );
-}
-
-/**
- * Wraps a route element in the intercept resolver:
- *
- *   createElement(__appRouterInterceptResolver__, {
- *       regular: <regular element>,
- *       intercepts: [
- *           { source: '/feed', element: createElement(InterceptN) },
- *           ...
- *       ]
- *   })
- */
-function wrapWithInterceptResolver(
-    regularElement: t.Expression,
-    targetIntercepts: InterceptedRoute[],
-    interceptMap: Map<string, string>,
-    loadingMap: Map<string, string>,
-    lazy: boolean
-): t.CallExpression {
-    const interceptObjects = targetIntercepts.map((ic) => {
-        const componentName = interceptMap.get(ic.pagePath)!;
-        const loadingName = ic.loadingPath ? loadingMap.get(ic.loadingPath) : undefined;
-        return t.objectExpression([
-            t.objectProperty(t.identifier('source'), t.stringLiteral(ic.sourcePattern)),
-            t.objectProperty(
-                t.identifier('element'),
-                createSuspenseWrapper(componentName, lazy, loadingName)
-            ),
-        ]);
-    });
-
-    return t.callExpression(t.identifier('createElement'), [
-        t.identifier(INTERCEPT_RESOLVER_NAME),
-        t.objectExpression([
-            t.objectProperty(t.identifier('regular'), regularElement),
-            t.objectProperty(
-                t.identifier('intercepts'),
-                t.arrayExpression(interceptObjects)
-            ),
-        ]),
-    ]);
-}
 
 /**
  * Builds a nested route structure for a single route
@@ -540,8 +407,6 @@ function buildRouteExpression(
     loadingMap: Map<string, string>,
     errorMap: Map<string, string>,
     notFoundMap: Map<string, string>,
-    interceptMap: Map<string, string>,
-    interceptsByTarget: Map<string, InterceptedRoute[]>,
     lazy: boolean
 ): t.ObjectExpression {
     const pageName = componentMap.get(route.pagePath)!;
@@ -552,19 +417,9 @@ function buildRouteExpression(
     const loadingName = route.loadingPath ? loadingMap.get(route.loadingPath) : undefined;
     const errorName = route.errorPath ? errorMap.get(route.errorPath) : undefined;
 
-    let pageElement: t.Expression = createSuspenseWrapper(pageName, lazy, loadingName);
-
-    // If this target has any intercepts, wrap the element in the resolver.
-    const targetIntercepts = interceptsByTarget.get(route.pattern);
-    if (targetIntercepts && targetIntercepts.length > 0) {
-        pageElement = wrapWithInterceptResolver(
-            pageElement,
-            targetIntercepts,
-            interceptMap,
-            loadingMap,
-            lazy
-        );
-    }
+    // Pages no longer wrap with an intercept resolver — interception is
+    // handled at the AppRouter (InnerRouter) level via BrowserRouter+useRoutes.
+    const pageElement: t.Expression = createSuspenseWrapper(pageName, lazy, loadingName);
 
     // Build the base route properties
     const buildRouteProps = (props: t.ObjectProperty[]): t.ObjectExpression => {
@@ -677,8 +532,6 @@ interface BuilderCtx {
     loadingMap: Map<string, string>;
     errorMap: Map<string, string>;
     notFoundMap: Map<string, string>;
-    interceptMap: Map<string, string>;
-    interceptsByTarget: Map<string, InterceptedRoute[]>;
     /** Map of `default.tsx` absolute path → import name. */
     defaultMap: Map<string, string>;
     /** Map of `props.tsx` absolute path → import name (eager default import). */
@@ -789,17 +642,10 @@ function makePageNode(
     const useIndex = insideLayout && isAtRoot;
     const path = isAtRoot ? subtreeRoot : relativeFromRoot(node.path, subtreeRoot);
 
-    let pageElement: t.Expression = createSuspenseWrapper(pageName, ctx.lazy, loadingName);
-    const targetIntercepts = ctx.interceptsByTarget.get(node.path);
-    if (targetIntercepts && targetIntercepts.length > 0) {
-        pageElement = wrapWithInterceptResolver(
-            pageElement,
-            targetIntercepts,
-            ctx.interceptMap,
-            ctx.loadingMap,
-            ctx.lazy
-        );
-    }
+    // Pages no longer wrap themselves with an intercept resolver — the
+    // BrowserRouter+useRoutes mode handles interception at the InnerRouter
+    // level so the BG outlet stays mounted as the same React subtree.
+    const pageElement: t.Expression = createSuspenseWrapper(pageName, ctx.lazy, loadingName);
 
     if (useIndex) {
         return createRouteObject([
@@ -909,11 +755,13 @@ function buildSubtree(
     ctx: BuilderCtx,
     isRoot: boolean = false,
     insideLayout: boolean = false,
-    subtreeRoot: string = '/'
+    subtreeRoot: string = '/',
+    bypassInterceptingFilter: boolean = false
 ): t.ObjectExpression[] {
-    // Intercepting subtrees are handled separately via interceptsByTarget;
-    // they do not contribute to the regular route table.
-    if (node.isIntercepting) return [];
+    // Intercepting subtrees are normally rendered separately by the overlay
+    // route table (see buildInterceptsArray); skip them in the canonical
+    // walk. The bypass is set when the caller IS the overlay walk.
+    if (!bypassInterceptingFilter && node.isIntercepting) return [];
 
     const localLoading = node.loadingPath || inheritedLoading;
 
@@ -942,7 +790,15 @@ function buildSubtree(
     // Their children iterate normally below.
     for (const child of node.children) {
         inner.push(
-            ...buildSubtree(child, localLoading, ctx, false, childrenInsideLayout, subtreeRoot)
+            ...buildSubtree(
+                child,
+                localLoading,
+                ctx,
+                false,
+                childrenInsideLayout,
+                subtreeRoot,
+                bypassInterceptingFilter
+            )
         );
     }
 
@@ -1173,7 +1029,10 @@ function collectPathsFromTree(
     }
 
     function walk(node: RouteNode): void {
-        if (node.isIntercepting) return;
+        // Intercepting subtrees DO contribute imports — their pages/layouts
+        // are rendered via the overlay route table built by
+        // buildInterceptsArray. They just don't appear in the canonical
+        // routeDefinitions (buildSubtree filters them out by node identity).
         if (node.pagePath) pages.push(node.pagePath);
         if (node.layoutPath) layouts.push(node.layoutPath);
         if (node.loadingPath) loadings.push(node.loadingPath);
@@ -1208,7 +1067,6 @@ function collectImportsFromPaths(
     loadingMap: Map<string, string>;
     errorMap: Map<string, string>;
     notFoundMap: Map<string, string>;
-    interceptMap: Map<string, string>;
     defaultMap: Map<string, string>;
     sharedPropsMap: Map<string, string>;
 } {
@@ -1218,20 +1076,26 @@ function collectImportsFromPaths(
     const loadingMap = new Map<string, string>();
     const errorMap = new Map<string, string>();
     const notFoundMap = new Map<string, string>();
-    const interceptMap = new Map<string, string>();
     const defaultMap = new Map<string, string>();
     const sharedPropsMap = new Map<string, string>();
 
     const hasIntercepts = intercepts.length > 0;
 
-    const rrSpecifiers: t.ImportSpecifier[] = [
-        createNamedImport('createBrowserRouter'),
-        createNamedImport('RouterProvider'),
-        createNamedImport('Outlet'),
-    ];
+    const rrSpecifiers: t.ImportSpecifier[] = [createNamedImport('Outlet')];
     if (hasIntercepts) {
+        // Intercept mode: BrowserRouter + useRoutes so we can match against a
+        // background location and keep the BG outlet mounted as the same
+        // React subtree across the URL change. The overlay is rendered via
+        // useRoutes() against a per-intercept routes table (built by
+        // buildInterceptsArray) so route params and layouts work the same
+        // way they do for canonical routes.
+        rrSpecifiers.push(createNamedImport('BrowserRouter'));
+        rrSpecifiers.push(createNamedImport('useRoutes'));
         rrSpecifiers.push(createNamedImport('useLocation'));
         rrSpecifiers.push(createNamedImport('matchPath'));
+    } else {
+        rrSpecifiers.push(createNamedImport('createBrowserRouter'));
+        rrSpecifiers.push(createNamedImport('RouterProvider'));
     }
     statements.push(createImportDeclaration(rrSpecifiers, 'react-router-dom'));
 
@@ -1271,6 +1135,25 @@ function collectImportsFromPaths(
         return pathToIdentifier(importPath);
     }
 
+    // Tracks identifier names already used across all emit() / emitEager()
+    // calls in this module so distinct paths whose safeIdent collapses to the
+    // same value (e.g. `+(.)[id]` and `+[id]` both → `…IdLayout`) get unique
+    // suffixes instead of producing a duplicate `const` declaration.
+    const usedIdentifiers = new Set<string>();
+
+    function uniqueName(prefix: string, base: string, fallbackIndex: number): string {
+        let name = `${prefix}${base || fallbackIndex}`;
+        if (!usedIdentifiers.has(name)) {
+            usedIdentifiers.add(name);
+            return name;
+        }
+        let attempt = 2;
+        while (usedIdentifiers.has(`${name}_${attempt}`)) attempt++;
+        const unique = `${name}_${attempt}`;
+        usedIdentifiers.add(unique);
+        return unique;
+    }
+
     function emit(prefix: string, kind: Map<string, string>, paths: string[]): void {
         let i = 0;
         const seen = new Set<string>();
@@ -1278,7 +1161,7 @@ function collectImportsFromPaths(
             if (seen.has(p)) continue;
             seen.add(p);
             const safe = safeIdent(p);
-            const name = `${prefix}${safe || i++}`;
+            const name = uniqueName(prefix, safe, i++);
             const importPath = normalizeImportPath(p, rootDir);
             if (lazy) {
                 statements.push(createLazyImport(name, importPath));
@@ -1303,7 +1186,7 @@ function collectImportsFromPaths(
             if (seen.has(p)) continue;
             seen.add(p);
             const safe = safeIdent(p);
-            const name = `${prefix}${safe || i++}`;
+            const name = uniqueName(prefix, safe, i++);
             const importPath = normalizeImportPath(p, rootDir);
             statements.push(
                 createImportDeclaration([createDefaultImport(name)], `/${importPath}`)
@@ -1317,17 +1200,14 @@ function collectImportsFromPaths(
     emit('Loading', loadingMap, paths.loadings);
     emit('ErrorBoundary', errorMap, paths.errors);
     emit('NotFound', notFoundMap, paths.notFounds);
-    emit('Intercept', interceptMap, intercepts.map((ic) => ic.pagePath));
     emit('Default', defaultMap, paths.defaults);
     emitEager('SharedProps', sharedPropsMap, paths.sharedProps);
 
-    // Source loadings of intercepts (in addition to regular ones)
-    const extraLoadings = intercepts
-        .map((ic) => ic.loadingPath)
-        .filter((p): p is string => Boolean(p) && !loadingMap.has(p as string));
-    if (extraLoadings.length) {
-        emit('Loading', loadingMap, extraLoadings);
-    }
+    // Intercept subtrees ride on the canonical maps — collectPathsFromTree
+    // walks intercepting nodes too, so their pages/layouts/loadings already
+    // landed in `paths.*`. The legacy interceptMap return is kept for API
+    // shape but is left empty (its consumers now look up components in
+    // componentMap directly).
 
     return {
         statements,
@@ -1336,7 +1216,6 @@ function collectImportsFromPaths(
         loadingMap,
         errorMap,
         notFoundMap,
-        interceptMap,
         defaultMap,
         sharedPropsMap,
     };
@@ -1377,18 +1256,11 @@ function generateRoutesAST(
             usableIntercepts.push(ic);
         } else {
             console.warn(
-                `[vite-plugin-react-app-router] intercepting route at "${ic.pagePath}" ` +
-                `targets "${ic.targetPattern}" but no regular page exists for that path; ` +
-                `skipping interception. Create a page.tsx at that route to enable it.`
+                `[vite-plugin-react-app-router] intercepting subtree at "${ic.targetPattern}" ` +
+                `has no regular page mounted at that target; skipping interception. ` +
+                `Create a page.tsx at that route to enable it.`
             );
         }
-    }
-
-    const interceptsByTarget = new Map<string, InterceptedRoute[]>();
-    for (const ic of usableIntercepts) {
-        const list = interceptsByTarget.get(ic.targetPattern) || [];
-        list.push(ic);
-        interceptsByTarget.set(ic.targetPattern, list);
     }
 
     // The tree-based path produces correct error-boundary placement (matching
@@ -1403,7 +1275,6 @@ function generateRoutesAST(
     let loadingMap: Map<string, string>;
     let errorMap: Map<string, string>;
     let notFoundMap: Map<string, string>;
-    let interceptMap: Map<string, string>;
     let defaultMap: Map<string, string> = new Map();
     let sharedPropsMap: Map<string, string> = new Map();
 
@@ -1435,7 +1306,6 @@ function generateRoutesAST(
             loadingMap,
             errorMap,
             notFoundMap,
-            interceptMap,
             defaultMap,
             sharedPropsMap,
         } = collectImportsFromPaths(
@@ -1448,13 +1318,13 @@ function generateRoutesAST(
             hasAnySharedProps
         ));
     } else {
-        ({ statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap, interceptMap } =
+        ({ statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap } =
             collectImports(routes, rootDir, lazy, rootNotFound, usableIntercepts));
     }
 
-    if (usableIntercepts.length > 0) {
-        statements.push(createInterceptResolverDeclaration());
-    }
+    // The legacy resolver-per-target wrapper is gone — interception is done at
+    // the AppRouter level (BrowserRouter+useRoutes) so the BG outlet stays
+    // mounted across the URL change.
 
     const routeDefinitions: t.ObjectExpression[] = [];
 
@@ -1465,8 +1335,6 @@ function generateRoutesAST(
             loadingMap,
             errorMap,
             notFoundMap,
-            interceptMap,
-            interceptsByTarget,
             defaultMap,
             sharedPropsMap,
             lazy,
@@ -1532,8 +1400,6 @@ function generateRoutesAST(
                     loadingMap,
                     errorMap,
                     notFoundMap,
-                    interceptMap,
-                    interceptsByTarget,
                     lazy
                 )
             );
@@ -1558,17 +1424,7 @@ function generateRoutesAST(
             const loadingName = route.loadingPath ? loadingMap.get(route.loadingPath) : undefined;
             const errorName = route.errorPath ? errorMap.get(route.errorPath) : undefined;
 
-            let pageElement: t.Expression = createSuspenseWrapper(pageName, lazy, loadingName);
-            const targetIntercepts = interceptsByTarget.get(route.pattern);
-            if (targetIntercepts && targetIntercepts.length > 0) {
-                pageElement = wrapWithInterceptResolver(
-                    pageElement,
-                    targetIntercepts,
-                    interceptMap,
-                    loadingMap,
-                    lazy
-                );
-            }
+            const pageElement: t.Expression = createSuspenseWrapper(pageName, lazy, loadingName);
 
             const routeProps: t.ObjectProperty[] = [
                 createRouteProperty('path', t.stringLiteral(route.pattern)),
@@ -1604,45 +1460,373 @@ function generateRoutesAST(
         ])
     );
 
-    // const router = createBrowserRouter(routes)
-    statements.push(
-        t.variableDeclaration('const', [
-            t.variableDeclarator(
-                t.identifier('router'),
-                t.callExpression(t.identifier('createBrowserRouter'), [t.identifier('routes')])
-            ),
-        ])
-    );
+    if (usableIntercepts.length > 0) {
+        // Intercept mode — emit an __intercepts__ table where each entry is
+        // a self-contained route table for the overlay (intercept template's
+        // layout/page wrapping the canonical's sub-shareds), plus an
+        // InnerRouter component that lives inside <BrowserRouter> and runs
+        // useRoutes() against the matched entry's table on the live location.
+        // Main route table runs against the bg location when an intercept
+        // matches, so the BG component instances stay mounted across the URL
+        // change and the intercept renders as an overlay sibling.
+        const interceptCtx: BuilderCtx = {
+            componentMap,
+            layoutMap,
+            loadingMap,
+            errorMap,
+            notFoundMap,
+            defaultMap,
+            sharedPropsMap,
+            lazy,
+        };
+        statements.push(buildInterceptsArray(usableIntercepts, interceptCtx));
+        statements.push(...buildInnerRouterDeclaration());
+        statements.push(buildInterceptModeAppRouter());
+        // Intercept mode uses <BrowserRouter> + useRoutes() instead of the
+        // data router, so there is no createBrowserRouter instance. Still
+        // emit `router` (as null) so consumers re-exporting the virtual
+        // module's full surface (e.g. client.ts) don't fail to resolve the
+        // binding at import time.
+        statements.push(
+            t.variableDeclaration('const', [
+                t.variableDeclarator(t.identifier('router'), t.nullLiteral()),
+            ])
+        );
+        // export { router, routes }
+        statements.push(
+            t.exportNamedDeclaration(null, [
+                t.exportSpecifier(t.identifier('router'), t.identifier('router')),
+                t.exportSpecifier(t.identifier('routes'), t.identifier('routes')),
+            ])
+        );
+    } else {
+        // Regular mode — data router via createBrowserRouter.
+        statements.push(
+            t.variableDeclaration('const', [
+                t.variableDeclarator(
+                    t.identifier('router'),
+                    t.callExpression(t.identifier('createBrowserRouter'), [
+                        t.identifier('routes'),
+                    ])
+                ),
+            ])
+        );
 
-    // export function AppRouter() { return createElement(RouterProvider, { router }); }
-    const appRouterFunction = t.functionDeclaration(
-        t.identifier('AppRouter'),
-        [],
-        t.blockStatement([
-            t.returnStatement(
-                t.callExpression(t.identifier('createElement'), [
-                    t.identifier('RouterProvider'),
-                    t.objectExpression([
-                        t.objectProperty(t.identifier('router'), t.identifier('router')),
-                    ]),
-                ])
-            ),
-        ])
-    );
-    statements.push(t.exportNamedDeclaration(appRouterFunction));
+        const appRouterFunction = t.functionDeclaration(
+            t.identifier('AppRouter'),
+            [],
+            t.blockStatement([
+                t.returnStatement(
+                    t.callExpression(t.identifier('createElement'), [
+                        t.identifier('RouterProvider'),
+                        t.objectExpression([
+                            t.objectProperty(t.identifier('router'), t.identifier('router')),
+                        ]),
+                    ])
+                ),
+            ])
+        );
+        statements.push(t.exportNamedDeclaration(appRouterFunction));
 
-    // export { router, routes }
-    statements.push(
-        t.exportNamedDeclaration(null, [
-            t.exportSpecifier(t.identifier('router'), t.identifier('router')),
-            t.exportSpecifier(t.identifier('routes'), t.identifier('routes')),
-        ])
-    );
+        // export { router, routes }
+        statements.push(
+            t.exportNamedDeclaration(null, [
+                t.exportSpecifier(t.identifier('router'), t.identifier('router')),
+                t.exportSpecifier(t.identifier('routes'), t.identifier('routes')),
+            ])
+        );
+    }
 
     // export default AppRouter
     statements.push(t.exportDefaultDeclaration(t.identifier('AppRouter')));
 
     return t.program(statements);
+}
+
+/**
+ * Emits:
+ *   const __intercepts__ = [
+ *     {
+ *       source: '/clientes',
+ *       target: '/clientes/:id',
+ *       routes: [
+ *         {
+ *           path: '/clientes/:id',
+ *           element: <Suspense>…<InterceptLayout/>…</Suspense>,
+ *           children: [
+ *             { index: true, element: <Suspense>…<InterceptIndexPage/>…</Suspense> },
+ *             { path: 'info', element: <Suspense>…<InfoPage/>…</Suspense> },
+ *             { path: 'atendimentos', element: <Suspense>…<AtendimentosPage/>…</Suspense> },
+ *             ...
+ *           ],
+ *         },
+ *       ],
+ *     },
+ *     ...
+ *   ];
+ *
+ * Each entry's `routes` is a full route table built from the intercept's
+ * grafted RouteNode subtree, so the overlay can render its own layout shell
+ * (e.g. a Sheet/drawer) wrapping the paired canonical's sub-shareds — keeping
+ * the drawer mounted while tab-style sub-routes change.
+ */
+function buildInterceptsArray(
+    intercepts: InterceptedRoute[],
+    ctx: BuilderCtx
+): t.VariableDeclaration {
+    const entries = intercepts.map((ic) => {
+        // Build the overlay's route table by walking the grafted subtree.
+        // bypassInterceptingFilter=true so buildSubtree doesn't strip the
+        // tree (it's marked intercepting end-to-end). subtreeRoot=target so
+        // the root layout gets `path: targetPattern` and descendants emit
+        // relative paths react-router can nest.
+        const subtreeRoutes = buildSubtree(
+            ic.subtree,
+            undefined,
+            ctx,
+            /* isRoot */ true,
+            /* insideLayout */ false,
+            /* subtreeRoot */ ic.targetPattern,
+            /* bypassInterceptingFilter */ true
+        );
+        return t.objectExpression([
+            t.objectProperty(t.identifier('source'), t.stringLiteral(ic.sourcePattern)),
+            t.objectProperty(t.identifier('target'), t.stringLiteral(ic.targetPattern)),
+            t.objectProperty(t.identifier('routes'), t.arrayExpression(subtreeRoutes)),
+        ]);
+    });
+    return t.variableDeclaration('const', [
+        t.variableDeclarator(
+            t.identifier('__intercepts__'),
+            t.arrayExpression(entries)
+        ),
+    ]);
+}
+
+/**
+ * Emits:
+ *
+ *   const __EMPTY_OVERLAY_ROUTES__ = [];
+ *
+ *   function __innerRouter__() {
+ *     const location = useLocation();
+ *     const state = location.state;
+ *     const bg = state && state.appRouterBackgroundLocation;
+ *     let overlayRoutes = null;
+ *     let baseLoc = location;
+ *     if (bg && bg.pathname) {
+ *       for (let i = 0; i < __intercepts__.length; i++) {
+ *         const ic = __intercepts__[i];
+ *         if (
+ *           matchPath({ path: ic.source, end: false }, bg.pathname) &&
+ *           matchPath({ path: ic.target, end: false }, location.pathname)
+ *         ) {
+ *           overlayRoutes = ic.routes;
+ *           baseLoc = bg;
+ *           break;
+ *         }
+ *       }
+ *     }
+ *     const main = useRoutes(routes, baseLoc);
+ *     const overlay = useRoutes(overlayRoutes || __EMPTY_OVERLAY_ROUTES__, location);
+ *     return createElement(React.Fragment, null, main, overlay);
+ *   }
+ *
+ * Notes:
+ *   - target match uses end:false so /clientes/:id/info still matches when
+ *     the intercept is rooted at /clientes/:id (drawer stays mounted across
+ *     tab navigation inside it).
+ *   - overlay's useRoutes is called unconditionally (rules of hooks); the
+ *     empty-array sentinel is hoisted to module scope so React sees the same
+ *     reference across renders and doesn't churn its internal route cache.
+ */
+function buildInnerRouterDeclaration(): t.Statement[] {
+    const emptyDecl = t.variableDeclaration('const', [
+        t.variableDeclarator(
+            t.identifier('__EMPTY_OVERLAY_ROUTES__'),
+            t.arrayExpression([])
+        ),
+    ]);
+
+    const locationDecl = t.variableDeclaration('const', [
+        t.variableDeclarator(
+            t.identifier('location'),
+            t.callExpression(t.identifier('useLocation'), [])
+        ),
+    ]);
+    const stateDecl = t.variableDeclaration('const', [
+        t.variableDeclarator(
+            t.identifier('state'),
+            t.memberExpression(t.identifier('location'), t.identifier('state'))
+        ),
+    ]);
+    const bgDecl = t.variableDeclaration('const', [
+        t.variableDeclarator(
+            t.identifier('bg'),
+            t.logicalExpression(
+                '&&',
+                t.identifier('state'),
+                t.memberExpression(t.identifier('state'), t.identifier(BACKGROUND_LOCATION_KEY))
+            )
+        ),
+    ]);
+    const overlayRoutesDecl = t.variableDeclaration('let', [
+        t.variableDeclarator(t.identifier('overlayRoutes'), t.nullLiteral()),
+    ]);
+    const baseLocDecl = t.variableDeclaration('let', [
+        t.variableDeclarator(t.identifier('baseLoc'), t.identifier('location')),
+    ]);
+
+    // matchPath({ path: ic.source, end: false }, bg.pathname)
+    const sourceMatch = t.callExpression(t.identifier('matchPath'), [
+        t.objectExpression([
+            t.objectProperty(
+                t.identifier('path'),
+                t.memberExpression(t.identifier('ic'), t.identifier('source'))
+            ),
+            t.objectProperty(t.identifier('end'), t.booleanLiteral(false)),
+        ]),
+        t.memberExpression(t.identifier('bg'), t.identifier('pathname')),
+    ]);
+    // matchPath({ path: ic.target, end: false }, location.pathname)
+    const targetMatch = t.callExpression(t.identifier('matchPath'), [
+        t.objectExpression([
+            t.objectProperty(
+                t.identifier('path'),
+                t.memberExpression(t.identifier('ic'), t.identifier('target'))
+            ),
+            t.objectProperty(t.identifier('end'), t.booleanLiteral(false)),
+        ]),
+        t.memberExpression(t.identifier('location'), t.identifier('pathname')),
+    ]);
+
+    const ifMatch = t.ifStatement(
+        t.logicalExpression('&&', sourceMatch, targetMatch),
+        t.blockStatement([
+            t.expressionStatement(
+                t.assignmentExpression(
+                    '=',
+                    t.identifier('overlayRoutes'),
+                    t.memberExpression(t.identifier('ic'), t.identifier('routes'))
+                )
+            ),
+            t.expressionStatement(
+                t.assignmentExpression('=', t.identifier('baseLoc'), t.identifier('bg'))
+            ),
+            t.breakStatement(),
+        ])
+    );
+
+    const forStmt = t.forStatement(
+        t.variableDeclaration('let', [
+            t.variableDeclarator(t.identifier('i'), t.numericLiteral(0)),
+        ]),
+        t.binaryExpression(
+            '<',
+            t.identifier('i'),
+            t.memberExpression(t.identifier('__intercepts__'), t.identifier('length'))
+        ),
+        t.updateExpression('++', t.identifier('i')),
+        t.blockStatement([
+            t.variableDeclaration('const', [
+                t.variableDeclarator(
+                    t.identifier('ic'),
+                    t.memberExpression(
+                        t.identifier('__intercepts__'),
+                        t.identifier('i'),
+                        true
+                    )
+                ),
+            ]),
+            ifMatch,
+        ])
+    );
+
+    const guard = t.ifStatement(
+        t.logicalExpression(
+            '&&',
+            t.identifier('bg'),
+            t.memberExpression(t.identifier('bg'), t.identifier('pathname'))
+        ),
+        t.blockStatement([forStmt])
+    );
+
+    const mainDecl = t.variableDeclaration('const', [
+        t.variableDeclarator(
+            t.identifier('main'),
+            t.callExpression(t.identifier('useRoutes'), [
+                t.identifier('routes'),
+                t.identifier('baseLoc'),
+            ])
+        ),
+    ]);
+
+    const overlayDecl = t.variableDeclaration('const', [
+        t.variableDeclarator(
+            t.identifier('overlay'),
+            t.callExpression(t.identifier('useRoutes'), [
+                t.logicalExpression(
+                    '||',
+                    t.identifier('overlayRoutes'),
+                    t.identifier('__EMPTY_OVERLAY_ROUTES__')
+                ),
+                t.identifier('location'),
+            ])
+        ),
+    ]);
+
+    const ret = t.returnStatement(
+        t.callExpression(t.identifier('createElement'), [
+            t.memberExpression(t.identifier('React'), t.identifier('Fragment')),
+            t.nullLiteral(),
+            t.identifier('main'),
+            t.identifier('overlay'),
+        ])
+    );
+
+    const fn = t.functionDeclaration(
+        t.identifier('__innerRouter__'),
+        [],
+        t.blockStatement([
+            locationDecl,
+            stateDecl,
+            bgDecl,
+            overlayRoutesDecl,
+            baseLocDecl,
+            guard,
+            mainDecl,
+            overlayDecl,
+            ret,
+        ])
+    );
+
+    return [emptyDecl, fn];
+}
+
+/**
+ * Emits:
+ *   export function AppRouter() {
+ *     return createElement(BrowserRouter, null, createElement(__innerRouter__, null));
+ *   }
+ */
+function buildInterceptModeAppRouter(): t.ExportNamedDeclaration {
+    const fn = t.functionDeclaration(
+        t.identifier('AppRouter'),
+        [],
+        t.blockStatement([
+            t.returnStatement(
+                t.callExpression(t.identifier('createElement'), [
+                    t.identifier('BrowserRouter'),
+                    t.nullLiteral(),
+                    t.callExpression(t.identifier('createElement'), [
+                        t.identifier('__innerRouter__'),
+                        t.nullLiteral(),
+                    ]),
+                ])
+            ),
+        ])
+    );
+    return t.exportNamedDeclaration(fn);
 }
 
 /**

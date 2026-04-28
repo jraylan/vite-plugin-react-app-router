@@ -71,12 +71,22 @@ export interface RouteNode {
  * directory that contains `+name/`).
  */
 export interface SharedModuleDef {
-    /** Name (without leading `+`). */
+    /** Name (without leading `+` or intercept marker). */
     name: string;
     /** Absolute path of the `+name/` directory itself. */
     dirPath: string;
     /** Parent directory of `+name/` — its siblings + descendants are the visibility scope. */
     containerDir: string;
+    /**
+     * If the definition was prefixed with an intercept marker (e.g.
+     * `+(.)foo/`, `+(..)foo/`, `+(...)foo/`, `+(..)(..)foo/`), the climb level
+     * baked into the template. When invoked without a consumer-side marker,
+     * the template materialises as an interception using this level.
+     *   - `'same'` → `(.)`
+     *   - `'root'` → `(...)`
+     *   - number  → `(..)` ... `(..)(..)(..)` (climb count)
+     */
+    interceptLevel?: 'same' | 'root' | number;
     /** Files at `+name/` root. */
     layoutPath?: string;
     pagePath?: string;
@@ -134,18 +144,27 @@ export interface ParsedRoute {
 }
 
 /**
- * A route that intercepts another route when navigating from a specific source.
- * Mirrors Next.js App Router intercepting routes (`(.)`, `(..)`, `(..)(..)`, `(...)`).
+ * A route subtree that intercepts another route when navigating from a specific
+ * source. Mirrors Next.js App Router intercepting routes (`(.)`, `(..)`,
+ * `(..)(..)`, `(...)`).
+ *
+ * One entry per intercept invocation site (per mount). The subtree is a full
+ * RouteNode tree rooted at the intercept's mount URL — its layout/page replace
+ * the canonical's at the root, and its children carry the canonical's
+ * sub-shareds with absolute URLs so tab-style navigation keeps the overlay
+ * alive (e.g. /clientes/:id stays mounted across /clientes/:id/info, etc.).
  */
 export interface InterceptedRoute {
-    /** URL pattern for the source where interception originates (e.g., "/feed") */
+    /** URL pattern for the source where interception originates (e.g., "/feed"). */
     sourcePattern: string;
-    /** URL pattern for the route being intercepted (e.g., "/photo/:id") */
+    /** URL pattern for the intercept root (e.g., "/clientes/:id"). */
     targetPattern: string;
-    /** Path to the page.tsx of the intercepting route */
-    pagePath: string;
-    /** Loading component inherited from the source's tree (used for Suspense fallback) */
-    loadingPath?: string;
+    /**
+     * Grafted RouteNode subtree that materialises the intercept overlay. The
+     * root carries the intercept template's layout/page; children carry the
+     * paired canonical's sub-shareds with absolute URLs.
+     */
+    subtree: RouteNode;
 }
 
 export interface PluginOptions {
