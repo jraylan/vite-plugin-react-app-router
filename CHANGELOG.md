@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.2.0...v0.2.1) (2026-04-28)
+
+
+### Bug Fixes
+
+* fix vitual module missing export ([690bd07](https://github.com/jraylan/vite-plugin-react-app-router/commit/690bd07f3e7302ae2326f4fe62782c43c9adb82c))
+
 ## [0.2.0](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.14...v0.2.0) (2026-04-28)
 
 
