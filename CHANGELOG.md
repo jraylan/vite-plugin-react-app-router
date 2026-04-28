@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.14...v0.2.0) (2026-04-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **intercepts:** render overlays as full route subtrees
+
+### Features
+
+* **intercepts:** render overlays as full route subtrees ([82ae61c](https://github.com/jraylan/vite-plugin-react-app-router/commit/82ae61c6e1fef8adf10ee021dc35de3be1574cff))
+
 ## [0.1.14](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.1.13...v0.1.14) (2026-04-26)
 
  
