@@ -7,6 +7,7 @@
 declare module 'virtual:app-router' {
     import type { FC } from 'react';
     import type { RouteObject, createBrowserRouter } from 'react-router-dom';
+    import type { TemplateLinkFn } from 'vite-plugin-react-app-router/runtime';
 
     /**
      * Main router component
@@ -25,6 +26,23 @@ declare module 'virtual:app-router' {
      * Array of route objects for custom use
      */
     export const routes: RouteObject[];
+
+    /**
+     * Hook that resolves a template path against the build-time registry of
+     * shared route module invocations. Example:
+     *   const templateLink = useTemplateLink();
+     *   <Link to={templateLink('cliente/:id', { id })}>...</Link>
+     */
+    export const useTemplateLink: () => TemplateLinkFn;
+
+    // Runtime hooks re-exported from `vite-plugin-react-app-router/runtime`
+    // so consumers can pull them from the virtual module alongside AppRouter.
+    export {
+        useSlot,
+        useSharedModule,
+        useSharedSlot,
+        useSharedProps,
+    } from 'vite-plugin-react-app-router/runtime';
 
     const _default: FC;
     export default _default;

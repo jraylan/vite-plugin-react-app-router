@@ -12,7 +12,7 @@
 
 import { createContext, useContext, createElement } from 'react';
 import type { ReactElement, ReactNode } from 'react';
-import { useRoutes } from 'react-router-dom';
+import { useRoutes, useLocation } from 'react-router-dom';
 import type { RouteObject } from 'react-router-dom';
 
 export interface SlotDefinition {
@@ -73,6 +73,8 @@ export function SlotProvider(props: SlotProviderProps): ReactElement {
 export interface SharedModuleInfo {
     /** Name of the shared module rendered at this position (without `+`). */
     name: string;
+    /** URL pattern where this invocation is mounted (e.g. `/store`, `/clientes/:id`). */
+    mountUrl: string;
     /** Names of nested sub-shareds active at this invocation (after `[-name]/` overrides). */
     activeSubShareds: ReadonlyArray<string>;
 }
@@ -115,9 +117,7 @@ export function SharedModuleProvider(props: SharedModuleProviderProps): ReactEle
     );
 }
 
-// ---------------------------------------------------------------------------
 // Shared-module props (`props.tsx` at an invocation site).
-// ---------------------------------------------------------------------------
 
 /**
  * Default value for the props context. Empty so that components calling
@@ -155,4 +155,223 @@ export function SharedPropsProvider(props: SharedPropsProviderProps): ReactEleme
         { value: merged },
         props.children
     );
+}
+
+// Template link resolution (`useTemplateLink`).
+
+/**
+ * Single invocation site of a shared route module — the URL where its tree is
+ * mounted. Multiple sites can exist when the same `+name/` is invoked from
+ * different places (e.g. `(store)/[+cliente]/` and `@template/[+cliente]/`).
+ */
+export interface TemplateInvocation {
+    /** URL pattern where this invocation mounts (may contain `:param` segments). */
+    mountUrl: string;
+}
+
+/**
+ * Map of shared-module name → list of invocation sites. Generated at build
+ * time and supplied to `createUseTemplateLink`.
+ */
+export type TemplateRegistry = Record<string, ReadonlyArray<TemplateInvocation>>;
+
+/**
+ * Param values for `templateLink(...)`. Arrays join with `/` (catch-all). All
+ * values are URL-encoded per segment.
+ */
+export type TemplateLinkParams = Record<
+    string,
+    string | number | ReadonlyArray<string | number>
+>;
+
+export interface TemplateLinkOptions {
+    /**
+     * Force resolution to the invocation mounted at this URL (e.g. `/store`).
+     * Required when multiple invocations of the same template exist and the
+     * caller is not inside one of them.
+     */
+    from?: string;
+}
+
+export type TemplateLinkFn = (
+    templatePath: string,
+    params?: TemplateLinkParams,
+    opts?: TemplateLinkOptions
+) => string;
+
+function normalizeUrl(u: string): string {
+    if (!u) return '/';
+    const withSlash = u.startsWith('/') ? u : '/' + u;
+    const collapsed = withSlash.replace(/\/{2,}/g, '/').replace(/\/+$/, '');
+    return collapsed || '/';
+}
+
+function interpolate(path: string, params: TemplateLinkParams): string {
+    let out = path.replace(
+        /:([A-Za-z_][A-Za-z0-9_]*)(\?)?/g,
+        (_full: string, name: string, opt?: string) => {
+            const value = params[name];
+            if (value === undefined || value === null || value === '') {
+                if (opt) return '';
+                throw new Error(`useTemplateLink: missing param "${name}"`);
+            }
+            if (Array.isArray(value)) {
+                return value
+                    .map((v) => encodeURIComponent(String(v)))
+                    .join('/');
+            }
+            return encodeURIComponent(String(value));
+        }
+    );
+    if (out.includes('*')) {
+        const splat = params['*'];
+        const splatStr =
+            splat === undefined || splat === null
+                ? ''
+                : Array.isArray(splat)
+                    ? splat.map((v) => encodeURIComponent(String(v))).join('/')
+                    : encodeURIComponent(String(splat));
+        out = out.replace(/\*/g, splatStr);
+    }
+    return out;
+}
+
+function segments(path: string): string[] {
+    const cleaned = path.replace(/^\/+|\/+$/g, '');
+    if (!cleaned) return [];
+    return cleaned.split('/');
+}
+
+/**
+ * Tree distance between two URL paths: number of segments to "exit" the
+ * current path plus segments to "enter" the candidate, after stripping the
+ * longest common prefix. Pattern segments (`:param`, `*`) match any concrete
+ * segment for prefix purposes — so a candidate at `/noc/clientes/:id` shares
+ * prefix `/noc` with the live `/noc/list`.
+ */
+function pathDistance(current: string, candidate: string): number {
+    const cur = segments(current);
+    const cand = segments(candidate);
+    let lcp = 0;
+    while (lcp < cur.length && lcp < cand.length) {
+        const a = cur[lcp]!;
+        const b = cand[lcp]!;
+        if (a === b || b.startsWith(':') || b === '*') {
+            lcp++;
+        } else {
+            break;
+        }
+    }
+    return (cur.length - lcp) + (cand.length - lcp);
+}
+
+function pickClosest(
+    sites: ReadonlyArray<TemplateInvocation>,
+    currentPath: string
+): TemplateInvocation {
+    let bestIdx = 0;
+    let bestDist = pathDistance(currentPath, sites[0]!.mountUrl);
+    let bestDepth = segments(sites[0]!.mountUrl).length;
+    for (let i = 1; i < sites.length; i++) {
+        const d = pathDistance(currentPath, sites[i]!.mountUrl);
+        const depth = segments(sites[i]!.mountUrl).length;
+        if (d < bestDist || (d === bestDist && depth < bestDepth)) {
+            bestIdx = i;
+            bestDist = d;
+            bestDepth = depth;
+        }
+    }
+    return sites[bestIdx]!;
+}
+
+function resolveTemplateLink(
+    registry: TemplateRegistry,
+    current: SharedModuleInfo | null,
+    currentPath: string,
+    templatePath: string,
+    params: TemplateLinkParams,
+    opts: TemplateLinkOptions
+): string {
+    const cleaned = templatePath.replace(/^\/+|\/+$/g, '');
+    if (!cleaned) {
+        throw new Error('useTemplateLink: empty template path');
+    }
+    const slash = cleaned.indexOf('/');
+    const name = slash === -1 ? cleaned : cleaned.slice(0, slash);
+    const rest = slash === -1 ? '' : cleaned.slice(slash + 1);
+
+    const sites = registry[name];
+    if (!sites || sites.length === 0) {
+        throw new Error(
+            `useTemplateLink: no shared route module named "${name}". ` +
+            `Create a +${name}/ directory and invoke it via [+${name}]/ or (+${name})/.`
+        );
+    }
+
+    let chosen: TemplateInvocation | undefined;
+    if (opts.from !== undefined) {
+        const fromNorm = normalizeUrl(opts.from);
+        chosen = sites.find((s) => normalizeUrl(s.mountUrl) === fromNorm);
+        if (!chosen) {
+            const known = sites.map((s) => s.mountUrl).join(', ');
+            throw new Error(
+                `useTemplateLink: no invocation of "${name}" mounted at "${opts.from}". ` +
+                `Known mount points: ${known}.`
+            );
+        }
+    } else if (current && current.name === name) {
+        const ctxNorm = normalizeUrl(current.mountUrl);
+        chosen =
+            sites.find((s) => normalizeUrl(s.mountUrl) === ctxNorm) ?? sites[0];
+    } else if (sites.length === 1) {
+        chosen = sites[0];
+    } else {
+        // Multiple invocations, no `from`, and current shared-module context
+        // does not name this template. Pick the site closest to the live URL
+        // by tree distance (siblings beat nephews); ties broken by shallower
+        // mount path, then registry order.
+        chosen = pickClosest(sites, currentPath);
+    }
+
+    const mountInterp = interpolate(chosen!.mountUrl, params);
+    if (!rest) {
+        return normalizeUrl(mountInterp);
+    }
+    const restInterp = interpolate(rest, params);
+    if (!restInterp) {
+        return normalizeUrl(mountInterp);
+    }
+    const base = mountInterp.replace(/\/+$/, '');
+    return ((base || '') + '/' + restInterp).replace(/\/{2,}/g, '/') || '/';
+}
+
+/**
+ * Build a `useTemplateLink` hook bound to a static template registry. The
+ * generated virtual module calls this once with its registry and re-exports
+ * the returned hook.
+ *
+ * Usage in user code:
+ *   const templateLink = useTemplateLink();
+ *   <Link to={templateLink('cliente/:id', { id })}>...</Link>
+ *
+ * Resolution order: `opts.from` → enclosing `useSharedModule()` (when names
+ * match) → single invocation → throws on ambiguity.
+ */
+export function createUseTemplateLink(
+    registry: TemplateRegistry
+): () => TemplateLinkFn {
+    return function useTemplateLink(): TemplateLinkFn {
+        const current = useContext(SharedModuleContext);
+        const location = useLocation();
+        return function templateLink(templatePath, params, opts) {
+            return resolveTemplateLink(
+                registry,
+                current,
+                location.pathname,
+                templatePath,
+                params ?? {},
+                opts ?? {}
+            );
+        };
+    };
 }

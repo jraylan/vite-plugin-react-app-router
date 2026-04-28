@@ -17,8 +17,15 @@
  */
 
 // Re-export from virtual module
-export { AppRouter, router, routes, default } from 'virtual:app-router';
+export { AppRouter, router, routes, useTemplateLink, default } from 'virtual:app-router';
 
 // Public runtime helpers
 export { useSlot, useSharedModule, useSharedSlot, useSharedProps } from './runtime.js';
-export type { SharedModuleInfo } from './runtime.js';
+export type {
+    SharedModuleInfo,
+    TemplateLinkFn,
+    TemplateLinkParams,
+    TemplateLinkOptions,
+    TemplateInvocation,
+    TemplateRegistry,
+} from './runtime.js';

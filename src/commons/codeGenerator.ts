@@ -13,6 +13,15 @@ import { pathToIdentifier } from './routeParser.js';
 /** State key on history.state used to signal an intercepted navigation. */
 const BACKGROUND_LOCATION_KEY = 'appRouterBackgroundLocation';
 
+/**
+ * State key that, when truthy, opts a single navigation out of the intercept
+ * source check. The matcher then picks any intercept whose target matches the
+ * destination, regardless of whether `bg.pathname` matches its declared
+ * source. Useful for cross-area links (e.g. opening a clientes overlay from
+ * /chamados, where /chamados isn't paired as a source for that intercept).
+ */
+const ANY_SOURCE_KEY = 'appRouterAnySource';
+
 // Handle both ESM and CJS default exports
 const generate = typeof _generate === 'function' ? _generate : (_generate as { default: typeof _generate }).default;
 
@@ -576,6 +585,56 @@ function hasSharedInvocationInAnyNode(tree: RouteNode[]): boolean {
 }
 
 /**
+ * Collects every shared-module invocation site as a map of
+ * `name -> [mountUrl...]`. One entry per unique `(name, mountUrl)` pair, in
+ * tree-traversal order. Powers the `__templateRegistry__` constant consumed
+ * by `useTemplateLink`.
+ */
+function collectTemplateRegistry(tree: RouteNode[]): Map<string, string[]> {
+    const reg = new Map<string, string[]>();
+    function walk(nodes: RouteNode[]): void {
+        for (const n of nodes) {
+            if (n.sharedInvocation) {
+                const url = n.path || '/';
+                const arr = reg.get(n.sharedInvocation.name) ?? [];
+                if (!arr.includes(url)) arr.push(url);
+                reg.set(n.sharedInvocation.name, arr);
+            }
+            walk(n.children);
+            if (n.slots) {
+                for (const s of n.slots) walk(s.tree);
+            }
+        }
+    }
+    walk(tree);
+    return reg;
+}
+
+function buildTemplateRegistryAST(
+    reg: Map<string, string[]>
+): t.ObjectExpression {
+    const props: t.ObjectProperty[] = [];
+    for (const [name, urls] of reg) {
+        props.push(
+            t.objectProperty(
+                t.stringLiteral(name),
+                t.arrayExpression(
+                    urls.map((u) =>
+                        t.objectExpression([
+                            t.objectProperty(
+                                t.identifier('mountUrl'),
+                                t.stringLiteral(u)
+                            ),
+                        ])
+                    )
+                )
+            )
+        );
+    }
+    return t.objectExpression(props);
+}
+
+/**
  * Returns true if any node carries a `sharedPropsPath` (props.tsx at an
  * invocation site). Drives the SharedPropsProvider import + provider wrap.
  */
@@ -843,6 +902,10 @@ function buildSubtree(
                 t.stringLiteral(node.sharedInvocation.name)
             ),
             t.objectProperty(
+                t.identifier('mountUrl'),
+                t.stringLiteral(node.path || '/')
+            ),
+            t.objectProperty(
                 t.identifier('activeSubShareds'),
                 t.arrayExpression(
                     node.sharedInvocation.activeSubShareds.map((n) => t.stringLiteral(n))
@@ -1100,13 +1163,17 @@ function collectImportsFromPaths(
     statements.push(createImportDeclaration(rrSpecifiers, 'react-router-dom'));
 
     // Pull runtime providers from the package — SlotProvider (parallel routes),
-    // SharedModuleProvider (shared route modules) and SharedPropsProvider
-    // (props.tsx forwarding). One import statement when any combination is in use.
-    if (hasSlots || hasSharedInvocations || hasSharedProps) {
+    // SharedModuleProvider (shared route modules), SharedPropsProvider
+    // (props.tsx forwarding), and createUseTemplateLink (template-link hook
+    // factory). One import statement when any are in use.
+    {
         const specs: t.ImportSpecifier[] = [];
         if (hasSlots) specs.push(createNamedImport('SlotProvider'));
         if (hasSharedInvocations) specs.push(createNamedImport('SharedModuleProvider'));
         if (hasSharedProps) specs.push(createNamedImport('SharedPropsProvider'));
+        // Always import — `useTemplateLink` is exported from every virtual
+        // module so consumers can call it even before any +shared/ exists.
+        specs.push(createNamedImport('createUseTemplateLink'));
         statements.push(
             createImportDeclaration(specs, 'vite-plugin-react-app-router/runtime')
         );
@@ -1460,6 +1527,35 @@ function generateRoutesAST(
         ])
     );
 
+    // const __templateRegistry__ = { ... }
+    // export const useTemplateLink = createUseTemplateLink(__templateRegistry__)
+    // Emitted unconditionally so user code can import `useTemplateLink` from
+    // the virtual module even when no `+name/` directories exist yet — the
+    // registry is just empty and the hook throws on call with a clear message.
+    const templateRegistry = tree
+        ? collectTemplateRegistry(tree)
+        : new Map<string, string[]>();
+    statements.push(
+        t.variableDeclaration('const', [
+            t.variableDeclarator(
+                t.identifier('__templateRegistry__'),
+                buildTemplateRegistryAST(templateRegistry)
+            ),
+        ])
+    );
+    statements.push(
+        t.exportNamedDeclaration(
+            t.variableDeclaration('const', [
+                t.variableDeclarator(
+                    t.identifier('useTemplateLink'),
+                    t.callExpression(t.identifier('createUseTemplateLink'), [
+                        t.identifier('__templateRegistry__'),
+                    ])
+                ),
+            ])
+        )
+    );
+
     if (usableIntercepts.length > 0) {
         // Intercept mode — emit an __intercepts__ table where each entry is
         // a self-contained route table for the overlay (intercept template's
@@ -1536,6 +1632,31 @@ function generateRoutesAST(
             ])
         );
     }
+
+    // Re-export runtime hooks from the virtual module so consumers can
+    // `import { useSharedModule, useSlot, ... } from 'virtual:app-router'`
+    // alongside AppRouter / useTemplateLink.
+    statements.push(
+        t.exportNamedDeclaration(
+            null,
+            [
+                t.exportSpecifier(t.identifier('useSlot'), t.identifier('useSlot')),
+                t.exportSpecifier(
+                    t.identifier('useSharedModule'),
+                    t.identifier('useSharedModule')
+                ),
+                t.exportSpecifier(
+                    t.identifier('useSharedSlot'),
+                    t.identifier('useSharedSlot')
+                ),
+                t.exportSpecifier(
+                    t.identifier('useSharedProps'),
+                    t.identifier('useSharedProps')
+                ),
+            ],
+            t.stringLiteral('vite-plugin-react-app-router/runtime')
+        )
+    );
 
     // export default AppRouter
     statements.push(t.exportDefaultDeclaration(t.identifier('AppRouter')));
@@ -1641,10 +1762,20 @@ function buildInterceptsArray(
  *     reference across renders and doesn't churn its internal route cache.
  */
 function buildInnerRouterDeclaration(): t.Statement[] {
+    // Sentinel route table used when no intercept is active. A literal `[]`
+    // would make `useRoutes` log "No routes matched location ..." every render
+    // (React Router warns whenever its match returns null). A single catch-all
+    // route with `element: null` always matches and renders nothing, so the
+    // overlay slot stays silent until an intercept fires.
     const emptyDecl = t.variableDeclaration('const', [
         t.variableDeclarator(
             t.identifier('__EMPTY_OVERLAY_ROUTES__'),
-            t.arrayExpression([])
+            t.arrayExpression([
+                t.objectExpression([
+                    t.objectProperty(t.identifier('path'), t.stringLiteral('*')),
+                    t.objectProperty(t.identifier('element'), t.nullLiteral()),
+                ]),
+            ])
         ),
     ]);
 
@@ -1667,6 +1798,17 @@ function buildInnerRouterDeclaration(): t.Statement[] {
                 '&&',
                 t.identifier('state'),
                 t.memberExpression(t.identifier('state'), t.identifier(BACKGROUND_LOCATION_KEY))
+            )
+        ),
+    ]);
+    // const anySource = state && state.appRouterAnySource;
+    const anySourceDecl = t.variableDeclaration('const', [
+        t.variableDeclarator(
+            t.identifier('anySource'),
+            t.logicalExpression(
+                '&&',
+                t.identifier('state'),
+                t.memberExpression(t.identifier('state'), t.identifier(ANY_SOURCE_KEY))
             )
         ),
     ]);
@@ -1700,8 +1842,14 @@ function buildInnerRouterDeclaration(): t.Statement[] {
         t.memberExpression(t.identifier('location'), t.identifier('pathname')),
     ]);
 
+    // Match when target hits AND (caller opted out via anySource OR the
+    // intercept's declared source matches the bg location).
     const ifMatch = t.ifStatement(
-        t.logicalExpression('&&', sourceMatch, targetMatch),
+        t.logicalExpression(
+            '&&',
+            t.logicalExpression('||', t.identifier('anySource'), sourceMatch),
+            targetMatch
+        ),
         t.blockStatement([
             t.expressionStatement(
                 t.assignmentExpression(
@@ -1791,6 +1939,7 @@ function buildInnerRouterDeclaration(): t.Statement[] {
             locationDecl,
             stateDecl,
             bgDecl,
+            anySourceDecl,
             overlayRoutesDecl,
             baseLocDecl,
             guard,
@@ -1880,6 +2029,31 @@ function generateEmptyRoutesAST(): t.Program {
         t.exportNamedDeclaration(null, [
             t.exportSpecifier(t.identifier('router'), t.identifier('router')),
         ])
+    );
+
+    // Re-export runtime hooks from the virtual module so consumers can
+    // `import { useSharedModule, useSlot, ... } from 'virtual:app-router'`
+    // alongside AppRouter / useTemplateLink.
+    statements.push(
+        t.exportNamedDeclaration(
+            null,
+            [
+                t.exportSpecifier(t.identifier('useSlot'), t.identifier('useSlot')),
+                t.exportSpecifier(
+                    t.identifier('useSharedModule'),
+                    t.identifier('useSharedModule')
+                ),
+                t.exportSpecifier(
+                    t.identifier('useSharedSlot'),
+                    t.identifier('useSharedSlot')
+                ),
+                t.exportSpecifier(
+                    t.identifier('useSharedProps'),
+                    t.identifier('useSharedProps')
+                ),
+            ],
+            t.stringLiteral('vite-plugin-react-app-router/runtime')
+        )
     );
 
     // export default AppRouter
