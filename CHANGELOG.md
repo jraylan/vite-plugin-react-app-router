@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.2.1...v0.2.2) (2026-08-04)
+
+
+### Bug Fixes
+
+* fix `not-found` leaking it's context ([332a878](https://github.com/jraylan/vite-plugin-react-app-router/commit/332a878a51444206bd32f6aa2319c7e64218721a))
+
 ## [0.2.1](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.2.0...v0.2.1) (2026-04-28)
 
 
