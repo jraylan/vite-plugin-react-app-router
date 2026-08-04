@@ -980,6 +980,12 @@ interface ParentContext {
     notFoundPath?: string;
     /** Map of layout path to its specific not-found component */
     layoutNotFoundMap: Map<string, string>;
+    /**
+     * Map of layout path to the URL pattern of the segment that declares it.
+     * Optional so callers written before this field existed still type-check;
+     * flattenRoutes builds its own when the incoming context has none.
+     */
+    layoutPatternMap?: Map<string, string>;
 }
 
 export interface FlattenedRoutes {
@@ -1008,12 +1014,20 @@ export function flattenRoutes(
             errorPath: rootContext.errorPath || parentContext.errorPath,
             notFoundPath: rootContext.notFoundPath || parentContext.notFoundPath,
             layoutNotFoundMap: new Map(parentContext.layoutNotFoundMap),
+            layoutPatternMap: new Map(parentContext.layoutPatternMap),
         }
         : parentContext;
 
     // If root has a layout and not-found, add to map
     if (rootContext?.layoutPath && rootContext?.notFoundPath) {
         context.layoutNotFoundMap.set(rootContext.layoutPath, rootContext.notFoundPath);
+    }
+
+    // Layout -> URL of the segment that declares it. The root layout owns the
+    // whole origin; deeper segments register themselves in the loop below.
+    const layoutPatternMap = new Map(context.layoutPatternMap ?? []);
+    if (rootContext?.layoutPath) {
+        layoutPatternMap.set(rootContext.layoutPath, '/');
     }
 
     for (const node of nodes) {
@@ -1033,10 +1047,17 @@ export function flattenRoutes(
 
         // Build current context - child values override parent values
         const currentLayoutNotFoundMap = new Map(context.layoutNotFoundMap);
+        const currentLayoutPatternMap = new Map(layoutPatternMap);
 
         // If this node has a layout and a not-found, add to map
         if (node.layoutPath && node.notFoundPath) {
             currentLayoutNotFoundMap.set(node.layoutPath, node.notFoundPath);
+        }
+
+        // Remember which URL the layout's segment sits at, so a not-found
+        // paired with it can be scoped to that segment instead of the origin.
+        if (node.layoutPath) {
+            currentLayoutPatternMap.set(node.layoutPath, node.path || '/');
         }
 
         const currentContext: ParentContext = {
@@ -1045,6 +1066,7 @@ export function flattenRoutes(
             errorPath: node.errorPath || context.errorPath,
             notFoundPath: node.notFoundPath || context.notFoundPath,
             layoutNotFoundMap: currentLayoutNotFoundMap,
+            layoutPatternMap: currentLayoutPatternMap,
         };
 
         // If the node has a page, add the route
@@ -1057,6 +1079,7 @@ export function flattenRoutes(
                 errorPath: currentContext.errorPath,
                 notFoundPath: currentContext.notFoundPath,
                 layoutNotFoundMap: new Map(currentContext.layoutNotFoundMap),
+                layoutPatternMap: new Map(currentContext.layoutPatternMap),
             });
         }
 
@@ -1126,7 +1149,7 @@ export function parseAppRouter(options: PluginOptions = {}): {
     const root = getRootPage(appDir, extensions);
     const { routes, intercepts } = flattenRoutes(
         tree,
-        { layouts: [], layoutNotFoundMap: new Map() },
+        { layouts: [], layoutNotFoundMap: new Map(), layoutPatternMap: new Map() },
         root
     );
 
@@ -1134,6 +1157,11 @@ export function parseAppRouter(options: PluginOptions = {}): {
     const rootLayoutNotFoundMap = new Map<string, string>();
     if (root.layoutPath && root.notFoundPath) {
         rootLayoutNotFoundMap.set(root.layoutPath, root.notFoundPath);
+    }
+
+    const rootLayoutPatternMap = new Map<string, string>();
+    if (root.layoutPath) {
+        rootLayoutPatternMap.set(root.layoutPath, '/');
     }
 
     // Add the root route if it exists
@@ -1146,6 +1174,7 @@ export function parseAppRouter(options: PluginOptions = {}): {
             errorPath: root.errorPath,
             notFoundPath: root.notFoundPath,
             layoutNotFoundMap: rootLayoutNotFoundMap,
+            layoutPatternMap: rootLayoutPatternMap,
         });
     }
 

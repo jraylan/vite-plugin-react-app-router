@@ -141,6 +141,13 @@ export interface ParsedRoute {
     notFoundPath?: string;
     /** Map of layout path to its specific not-found component (for nested not-found support) */
     layoutNotFoundMap?: Map<string, string>;
+    /**
+     * Map of layout path to the URL pattern of the segment that declares it
+     * (e.g. `src/app/dashboard/layout.tsx` -> `/dashboard`). Used to scope a
+     * segment's not-found catch-all to that segment: layout routes are emitted
+     * without a path, so a bare `*` underneath one would match from the origin.
+     */
+    layoutPatternMap?: Map<string, string>;
 }
 
 /**

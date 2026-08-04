@@ -470,11 +470,20 @@ function buildRouteExpression(
             // Build children array with the inner route
             const childrenRoutes: t.ObjectExpression[] = [innerRoute];
 
-            // Add catch-all not-found route for this layout if it has one
+            // Add catch-all not-found route for this layout if it has one,
+            // scoped to the segment that declares the layout — the layout
+            // route itself is pathless, so an unscoped `*` here would answer
+            // for the whole origin instead of the segment (see notFoundPattern).
             if (layoutNotFoundName) {
+                const layoutPattern = route.layoutPatternMap?.get(layoutPath);
                 childrenRoutes.push(
                     createRouteObject([
-                        createRouteProperty('path', t.stringLiteral('*')),
+                        createRouteProperty(
+                            'path',
+                            t.stringLiteral(
+                                layoutPattern ? notFoundPattern(layoutPattern, '/') : '*'
+                            )
+                        ),
                         createRouteProperty('element', createSuspenseWrapper(layoutNotFoundName, lazy)),
                     ])
                 );
@@ -663,6 +672,33 @@ function relativeFromRoot(absolute: string, root: string): string {
     if (absolute === root) return '';
     if (absolute.startsWith(root + '/')) return absolute.slice(root.length + 1);
     return absolute.replace(/^\//, '');
+}
+
+/**
+ * Path for the catch-all route that renders a segment's `not-found.tsx`.
+ *
+ * Next scopes a segment's not-found to that segment: only URLs under
+ * `/dashboard` reach `app/dashboard/not-found.tsx`. Here the not-found route
+ * is emitted as a child of the segment's LAYOUT route, and layout routes are
+ * pathless (only the subtree root carries a path) — so a bare `'*'` would be
+ * resolved against the nearest ancestor that does have one, i.e. the root, and
+ * would answer for the whole origin. Prefixing with the segment's own pattern
+ * puts the match back where the file lives:
+ *
+ *   notFoundPattern('/dashboard', '/')        -> 'dashboard/*'
+ *   notFoundPattern('/clients/:id', '/')      -> 'clients/:id/*'
+ *   notFoundPattern('/', '/')                 -> '*'          (root: global)
+ *   notFoundPattern('/files/*', '/')          -> 'files/*'    (already total)
+ *
+ * A catch-all segment (`[...rest]/`) already owns everything below it, and a
+ * doubled star is not a legal react-router path, so a pattern that already
+ * ends in a star is reused as is.
+ */
+function notFoundPattern(nodePath: string, subtreeRoot: string): string {
+    const relative = relativeFromRoot(nodePath || '/', subtreeRoot);
+    if (relative === '' || relative === '/') return '*';
+    if (relative.endsWith('*')) return relative;
+    return `${relative.replace(/\/$/, '')}/*`;
 }
 
 /**
@@ -867,7 +903,10 @@ function buildSubtree(
         if (notFoundName) {
             inner.push(
                 createRouteObject([
-                    createRouteProperty('path', t.stringLiteral('*')),
+                    createRouteProperty(
+                        'path',
+                        t.stringLiteral(notFoundPattern(node.path, subtreeRoot))
+                    ),
                     createRouteProperty(
                         'element',
                         createSuspenseWrapper(notFoundName, ctx.lazy)
