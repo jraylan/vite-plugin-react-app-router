@@ -47,6 +47,8 @@
     "build": "tsc",
     "prebuild": "node scripts/prebuild.mjs",
     "dev": "tsc --watch",
+    "test": "bun test tests",
+    "test:watch": "bun test --watch tests",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

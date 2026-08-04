@@ -116,7 +116,7 @@ src/app/
 | `layout.tsx`    | Layout that wraps child pages                                         |
 | `loading.tsx`   | Loading component (used as Suspense fallback)                         |
 | `error.tsx`     | Error boundary (renders inside the layout of the same segment)        |
-| `not-found.tsx` | 404 component (catch-all route for unmatched paths)                   |
+| `not-found.tsx` | 404 component (catch-all for unmatched paths **inside its segment**)  |
 | `default.tsx`   | Inside `@slot/`, fallback rendered when no slot route matches the URL |
 
 ## Dynamic Routes & Special Directories
