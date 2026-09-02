@@ -1365,6 +1365,19 @@ function collectImportsFromPaths(
 /**
  * Generates the complete routes module AST
  */
+/**
+ * Whether some regular route is mounted at `target` or below it (by URL
+ * pattern: `/photo/:id` is under `/photo`, `/photos` is not).
+ */
+function hasCanonicalRouteUnder(routes: ParsedRoute[], target: string): boolean {
+    const base = target.replace(/\/+$/, '') || '/';
+    return routes.some((r) => {
+        const pattern = r.pattern.replace(/\/+$/, '') || '/';
+        if (base === '/') return true;
+        return pattern === base || pattern.startsWith(base + '/');
+    });
+}
+
 function generateRoutesAST(
     routes: ParsedRoute[],
     options: CodeGeneratorOptions
@@ -1387,20 +1400,22 @@ function generateRoutesAST(
         return generateEmptyRoutesAST(routerPackage);
     }
 
-    // Drop intercepts whose target route doesn't exist — without a regular sibling
-    // route there is no element to wrap, and the URL would not be reachable at all
-    // with the current renderer (a future iteration could synthesize a standalone
-    // route, but that hides the misconfiguration from the developer).
-    const targetPatterns = new Set(routes.map((r) => r.pattern));
+    // Drop intercepts with no canonical route under their target. The overlay
+    // matches its target with `end: false` and runs the intercept's own route
+    // table, so the target itself needs no page: `feed/(..)photo/[id]/` pairs
+    // with `photo/[id]/page.tsx` even though nothing renders at `/photo`. What
+    // must exist is at least one regular page at or below the target —
+    // otherwise a hard refresh on the intercepted URL has nothing to show, and
+    // the intercept would silently hide that misconfiguration.
     const usableIntercepts: InterceptedRoute[] = [];
     for (const ic of intercepts) {
-        if (targetPatterns.has(ic.targetPattern)) {
+        if (hasCanonicalRouteUnder(routes, ic.targetPattern)) {
             usableIntercepts.push(ic);
         } else {
             console.warn(
                 `[vite-plugin-react-app-router] intercepting subtree at "${ic.targetPattern}" ` +
-                `has no regular page mounted at that target; skipping interception. ` +
-                `Create a page.tsx at that route to enable it.`
+                `has no regular page at or below that target; skipping interception. ` +
+                `Create a page.tsx at that route (or under it) to enable it.`
             );
         }
     }

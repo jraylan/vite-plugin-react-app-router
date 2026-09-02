@@ -187,14 +187,12 @@ function generateFor(appDir: string, routerPackage?: RouterPackage): string {
 }
 
 const REGULAR_APP = ['layout.tsx', 'page.tsx', 'about/page.tsx'];
-// `/feed` intercepts `/photo`; the generator only keeps an intercept whose
-// target (`/photo`, the intercept root) has a regular page of its own.
+// The README's intercepting-routes example: `/feed` intercepts `/photo/:id`.
 const INTERCEPT_APP = [
     'layout.tsx',
     'page.tsx',
     'feed/page.tsx',
     'feed/(..)photo/[id]/page.tsx',
-    'photo/page.tsx',
     'photo/[id]/page.tsx',
 ];
 
