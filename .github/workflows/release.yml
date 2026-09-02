@@ -1,9 +1,23 @@
 name: Release
 
+# Runs on every push to main (release-please opens/updates the release PR and,
+# once it is merged, cuts the release and publishes). It can also be started
+# by hand from the Actions tab: by default that behaves exactly like a push;
+# tick `publish` to force publishing the version in package.json, e.g. to
+# retry a publish that failed after the GitHub release was already created.
+#
+# npm trusted publishing is bound to this file name (release.yml): the
+# `npm publish --provenance` step must stay here.
 on:
     push:
         branches:
             - main
+    workflow_dispatch:
+        inputs:
+            publish:
+                description: "Publish the version in package.json to npm even if release-please creates no release in this run"
+                type: boolean
+                default: false
 
 permissions:
     contents: write
@@ -26,7 +40,7 @@ jobs:
 
     publish:
         needs: release-please
-        if: ${{ needs.release-please.outputs.release_created }}
+        if: ${{ needs.release-please.outputs.release_created == 'true' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
         runs-on: ubuntu-latest
         permissions:
             contents: write
@@ -54,6 +68,17 @@ jobs:
             - name: Build
               run: bun run build
 
+            # release-please only hands us a tag when it created the release in
+            # this run; a forced manual publish derives it from package.json.
+            - name: Resolve release tag
+              id: tag
+              run: |
+                  TAG="${{ needs.release-please.outputs.tag_name }}"
+                  if [ -z "$TAG" ]; then
+                      TAG="v$(node -p "require('./package.json').version")"
+                  fi
+                  echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
+
             - name: Create tarball package
               id: pack
               run: |
@@ -73,7 +98,7 @@ jobs:
             - name: Add provenance to release
               uses: softprops/action-gh-release@v1
               with:
-                  tag_name: ${{ needs.release-please.outputs.tag_name }}
+                  tag_name: ${{ steps.tag.outputs.tag_name }}
                   files: " ${{ steps.pack.outputs.filename }}"
                   append_body: true
                   body: |
