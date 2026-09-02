@@ -36,16 +36,23 @@ jobs:
             - name: Checkout
               uses: actions/checkout@v4
 
+            # Bun installs and builds (the project's lockfile is bun.lock).
+            # Node/npm stay only for `npm pack` and `npm publish --provenance`.
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: latest
+
             - name: Setup Node.js
               uses: actions/setup-node@v4
               with:
                   node-version: "24"
 
             - name: Install dependencies
-              run: npm ci
+              run: bun install --frozen-lockfile
 
             - name: Build
-              run: npm run build
+              run: bun run build
 
             - name: Create tarball package
               id: pack
