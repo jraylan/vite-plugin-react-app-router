@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.3](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.2.2...v0.2.3) (2026-09-02)
+
+
+### Features
+
+* support react-router 8 ([c6dfc8a](https://github.com/jraylan/vite-plugin-react-app-router/commit/c6dfc8a767bfbc5d40d9369e094cefee01b63e3f))
+
+
+### Bug Fixes
+
+* **intercepts:** keep intercepts whose canonical page lives below the target ([4c8b4c8](https://github.com/jraylan/vite-plugin-react-app-router/commit/4c8b4c8f4523d8b8eaa773ed03c8382bcd94da7a))
+
 ## [0.2.2](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.2.1...v0.2.2) (2026-08-04)
 
 
