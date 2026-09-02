@@ -6,8 +6,22 @@
 
 declare module 'virtual:app-router' {
     import type { FC } from 'react';
-    import type { RouteObject, createBrowserRouter } from 'react-router-dom';
+    // `react-router` exists on every supported major (6, 7 and 8), while
+    // `react-router-dom` is gone in v8. `RouteObject` has always been exported
+    // from it; `createBrowserRouter` only since v7, hence the conditional below.
+    import type * as ReactRouter from 'react-router';
+    import type { RouteObject } from 'react-router';
     import type { TemplateLinkFn } from 'vite-plugin-react-app-router/runtime';
+
+    /**
+     * Return type of `createBrowserRouter` when the installed `react-router`
+     * exports it (v7+); `unknown` on v6, where it lives in `react-router-dom`.
+     */
+    type DataRouter = typeof ReactRouter extends {
+        createBrowserRouter: (...args: any[]) => infer R;
+    }
+        ? R
+        : unknown;
 
     /**
      * Main router component
@@ -20,7 +34,7 @@ declare module 'virtual:app-router' {
      * `null` in intercept mode — that build path uses <BrowserRouter> +
      * useRoutes() instead of the data router, so no instance exists.
      */
-    export const router: ReturnType<typeof createBrowserRouter> | null;
+    export const router: DataRouter | null;
 
     /**
      * Array of route objects for custom use

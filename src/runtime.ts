@@ -12,8 +12,11 @@
 
 import { createContext, useContext, createElement } from 'react';
 import type { ReactElement, ReactNode } from 'react';
-import { useRoutes, useLocation } from 'react-router-dom';
-import type { RouteObject } from 'react-router-dom';
+// `react-router` is the one package present on every supported major: v6 and
+// v7 ship it as the dependency behind `react-router-dom`, and v8 removed
+// `react-router-dom` altogether. Both hooks have lived there since 6.0.
+import { useRoutes, useLocation } from 'react-router';
+import type { RouteObject } from 'react-router';
 
 export interface SlotDefinition {
     /** Route table for this slot. Matched independently against the URL. */

@@ -1,5 +1,5 @@
 /**
- * Code generator for react-router-dom using AST
+ * Code generator for React Router using AST
  * Generates the virtual module code that exports routes
  *
  * Uses nested routes for layouts, enabling efficient SPA navigation
@@ -9,6 +9,7 @@ import * as t from '@babel/types';
 import _generate from '@babel/generator';
 import type { ParsedRoute, InterceptedRoute, RouteNode, ParallelSlot } from './types.js';
 import { pathToIdentifier } from './routeParser.js';
+import { REACT_ROUTER_DOM_PACKAGE, type RouterPackage } from './routerPackage.js';
 
 /** State key on history.state used to signal an intercepted navigation. */
 const BACKGROUND_LOCATION_KEY = 'appRouterBackgroundLocation';
@@ -65,6 +66,32 @@ function createImportDeclaration(
 function createNamedImport(name: string): t.ImportSpecifier {
     const id = t.identifier(name);
     return t.importSpecifier(id, id);
+}
+
+/**
+ * Emits the React Router import statement(s) for `specifiers`.
+ *
+ * `RouterProvider` is the one export that moved: React Router 7/8 ship it from
+ * `react-router/dom`, while `react-router-dom` (v6/v7) exposes it next to
+ * everything else. When both specifiers of the package are the same module
+ * this collapses into a single statement, so the output for `react-router-dom`
+ * projects is unchanged.
+ */
+function createRouterImports(
+    specifiers: t.ImportSpecifier[],
+    routerPackage: RouterPackage
+): t.ImportDeclaration[] {
+    if (routerPackage.core === routerPackage.dom) {
+        return [createImportDeclaration(specifiers, routerPackage.core)];
+    }
+    const isDomOnly = (s: t.ImportSpecifier) =>
+        t.isIdentifier(s.imported) && s.imported.name === 'RouterProvider';
+    const core = specifiers.filter((s) => !isDomOnly(s));
+    const dom = specifiers.filter(isDomOnly);
+    const statements: t.ImportDeclaration[] = [];
+    if (core.length > 0) statements.push(createImportDeclaration(core, routerPackage.core));
+    if (dom.length > 0) statements.push(createImportDeclaration(dom, routerPackage.dom));
+    return statements;
 }
 
 /**
@@ -168,8 +195,9 @@ function collectImports(
     routes: ParsedRoute[],
     rootDir: string,
     lazy: boolean,
-    rootNotFound?: string,
-    intercepts: InterceptedRoute[] = []
+    rootNotFound: string | undefined,
+    intercepts: InterceptedRoute[],
+    routerPackage: RouterPackage
 ): CollectedImports {
     const statements: t.Statement[] = [];
     const componentMap = new Map<string, string>();
@@ -190,7 +218,7 @@ function collectImports(
 
     const hasIntercepts = intercepts.length > 0;
 
-    // Import from react-router-dom. Two router shapes:
+    // Import from React Router. Two router shapes:
     //   - intercept mode → BrowserRouter + useRoutes (preserves BG instances)
     //   - regular mode  → createBrowserRouter + RouterProvider (data router)
     const rrSpecifiers: t.ImportSpecifier[] = [createNamedImport('Outlet')];
@@ -208,7 +236,7 @@ function collectImports(
         rrSpecifiers.push(createNamedImport('createBrowserRouter'));
         rrSpecifiers.push(createNamedImport('RouterProvider'));
     }
-    statements.push(createImportDeclaration(rrSpecifiers, 'react-router-dom'));
+    statements.push(...createRouterImports(rrSpecifiers, routerPackage));
 
     // Import from react
     const reactImports: t.ImportSpecifier[] = [
@@ -539,6 +567,12 @@ export interface CodeGeneratorOptions {
     rootLoading?: string;
     /** Parallel-route slots owned by the app root segment. */
     rootSlots?: ParallelSlot[];
+    /**
+     * Which React Router package the generated module imports from. Defaults
+     * to `react-router-dom` (v6/v7). React Router 8 dropped that package, so
+     * callers resolve it per project via `resolveRouterPackage`.
+     */
+    routerPackage?: RouterPackage;
 }
 
 /**
@@ -1161,7 +1195,8 @@ function collectImportsFromPaths(
     intercepts: InterceptedRoute[],
     hasSlots: boolean,
     hasSharedInvocations: boolean,
-    hasSharedProps: boolean
+    hasSharedProps: boolean,
+    routerPackage: RouterPackage
 ): {
     statements: t.Statement[];
     componentMap: Map<string, string>;
@@ -1199,7 +1234,7 @@ function collectImportsFromPaths(
         rrSpecifiers.push(createNamedImport('createBrowserRouter'));
         rrSpecifiers.push(createNamedImport('RouterProvider'));
     }
-    statements.push(createImportDeclaration(rrSpecifiers, 'react-router-dom'));
+    statements.push(...createRouterImports(rrSpecifiers, routerPackage));
 
     // Pull runtime providers from the package — SlotProvider (parallel routes),
     // SharedModuleProvider (shared route modules), SharedPropsProvider
@@ -1345,10 +1380,11 @@ function generateRoutesAST(
         rootError,
         rootLoading,
         rootSlots,
+        routerPackage = REACT_ROUTER_DOM_PACKAGE,
     } = options;
 
     if (routes.length === 0) {
-        return generateEmptyRoutesAST();
+        return generateEmptyRoutesAST(routerPackage);
     }
 
     // Drop intercepts whose target route doesn't exist — without a regular sibling
@@ -1421,11 +1457,12 @@ function generateRoutesAST(
             usableIntercepts,
             hasAnySlot,
             hasAnySharedInvocation,
-            hasAnySharedProps
+            hasAnySharedProps,
+            routerPackage
         ));
     } else {
         ({ statements, componentMap, layoutMap, loadingMap, errorMap, notFoundMap } =
-            collectImports(routes, rootDir, lazy, rootNotFound, usableIntercepts));
+            collectImports(routes, rootDir, lazy, rootNotFound, usableIntercepts, routerPackage));
     }
 
     // The legacy resolver-per-target wrapper is gone — interception is done at
@@ -2020,7 +2057,9 @@ function buildInterceptModeAppRouter(): t.ExportNamedDeclaration {
 /**
  * Generates AST for empty routes
  */
-function generateEmptyRoutesAST(): t.Program {
+function generateEmptyRoutesAST(
+    routerPackage: RouterPackage = REACT_ROUTER_DOM_PACKAGE
+): t.Program {
     const statements: t.Statement[] = [];
 
     // import { createElement } from 'react'
@@ -2028,11 +2067,11 @@ function generateEmptyRoutesAST(): t.Program {
         createImportDeclaration([createNamedImport('createElement')], 'react')
     );
 
-    // import { createBrowserRouter, RouterProvider } from 'react-router-dom'
+    // import { createBrowserRouter, RouterProvider } from the router package
     statements.push(
-        createImportDeclaration(
+        ...createRouterImports(
             [createNamedImport('createBrowserRouter'), createNamedImport('RouterProvider')],
-            'react-router-dom'
+            routerPackage
         )
     );
 
@@ -2194,8 +2233,10 @@ export function generateDevRoutesCode(
 /**
  * Generates empty routes code (fallback when no routes exist)
  */
-export function generateEmptyRoutesCode(): string {
-    const ast = generateEmptyRoutesAST();
+export function generateEmptyRoutesCode(
+    options: Pick<CodeGeneratorOptions, 'routerPackage'> = {}
+): string {
+    const ast = generateEmptyRoutesAST(options.routerPackage);
     const output = generate(ast, {
         comments: true,
         compact: false,

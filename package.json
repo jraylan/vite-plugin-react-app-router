@@ -49,7 +49,7 @@
     "dev": "tsc --watch",
     "test": "bun test tests",
     "test:watch": "bun test --watch tests",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "bun run build"
   },
   "keywords": [
     "vite",
@@ -66,15 +66,25 @@
     "@types/babel__generator": "^7.27.0",
     "@types/node": "^25.1.0",
     "@types/react": "^19.2.14",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-router": "^8.3.1",
     "typescript": "^5 || ^6",
     "vite": "^6 || ^7.3.1 || ^8"
   },
   "peerDependencies": {
     "react": "^18 || ^19",
     "react-dom": "^18 || ^19",
+    "react-router": "^6 || ^7 || ^8",
     "react-router-dom": "^6 || ^7"
   },
   "peerDependenciesMeta": {
+    "react-router": {
+      "optional": true
+    },
+    "react-router-dom": {
+      "optional": true
+    },
     "typescript": {
       "optional": true
     }

@@ -1,6 +1,7 @@
 import type {
     Plugin,
 } from 'vite';
+import type { RouterPackagePreference } from './routerPackage.js';
 
 /**
  * Shared types between server and build
@@ -191,6 +192,17 @@ export interface PluginOptions {
      * resulting in smaller initial bundle size and better performance.
      */
     lazy?: boolean;
+    /**
+     * Which React Router package the generated routes import from
+     * (default: `'auto'`).
+     * - `'auto'`: detects what is installed. `react-router` 8+ (or 7+ without
+     *   the `react-router-dom` shim) → `react-router` + `react-router/dom`;
+     *   otherwise `react-router-dom`.
+     * - `'react-router-dom'`: force the v6/v7 package.
+     * - `'react-router'`: force `react-router` (+ `react-router/dom` for
+     *   `RouterProvider`), as required by React Router 8.
+     */
+    routerPackage?: RouterPackagePreference;
 }
 
 export interface GeneratedRouteCode {

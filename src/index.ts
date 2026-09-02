@@ -2,7 +2,8 @@
  * vite-plugin-react-app-router
  * 
  * Vite plugin that brings Next.js App Router to standard React projects.
- * Generates react-router-dom routes dynamically based on directory structure.
+ * Generates React Router routes dynamically based on directory structure.
+ * Works with react-router-dom 6/7 and react-router 7/8 (see `routerPackage`).
  */
 
 import type { Plugin } from 'vite';

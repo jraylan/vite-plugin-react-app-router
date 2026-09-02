@@ -4,7 +4,7 @@
  * ranking that could agree with the bug.
  */
 
-import { matchRoutes, type RouteObject } from 'react-router-dom';
+import { matchRoutes, type RouteObject } from 'react-router';
 import { describeRoute, type RouteEntry } from './routeTable.js';
 
 /** The chain of routes react-router walks to reach `url`, root first. */

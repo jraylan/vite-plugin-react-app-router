@@ -1,6 +1,6 @@
 # vite-plugin-react-app-router
 
-A Vite plugin that brings **Next.js App Router** file-based routing to standard React projects. Generates `react-router-dom` routes dynamically based on your directory structure.
+A Vite plugin that brings **Next.js App Router** file-based routing to standard React projects. Generates React Router routes dynamically based on your directory structure.
 
 ## Features
 
@@ -17,7 +17,7 @@ A Vite plugin that brings **Next.js App Router** file-based routing to standard 
 
 - Provide Next.js App Router-like DX in standard React + Vite projects
 - Zero config file generation in source directory
-- Seamless integration with `react-router-dom`
+- Seamless integration with React Router (`react-router-dom` 6/7 or `react-router` 7/8)
 - Minimal runtime overhead
 
 ## Limitations
@@ -27,7 +27,7 @@ A Vite plugin that brings **Next.js App Router** file-based routing to standard 
 ## Installation
 
 ```bash
-npm install vite-plugin-react-app-router react-router-dom
+npm install vite-plugin-react-app-router react-router
 ```
 
 ## Configuration
@@ -59,6 +59,7 @@ export default defineConfig({
 | `appDir` | `string`                         | `'src/app'` | Directory containing the app router files                                                            |
 | `lazy`   | `boolean`                        | `true`      | Enable lazy loading using `React.lazy()` for code splitting. Results in smaller initial bundle size. |
 | `debug`  | `boolean \| 'console' \| string` | `false`     | Debug mode: `true`/`'console'` logs to console, string path writes to file                           |
+| `routerPackage` | `'auto' \| 'react-router-dom' \| 'react-router'` | `'auto'` | Which React Router package the generated routes import from. `'auto'` follows what is installed (see [React Router version](#react-router-version)). |
 
 ### main.tsx
 
@@ -164,7 +165,7 @@ src/app/
 Trigger an intercepted navigation by setting `state.appRouterBackgroundLocation` on a `<Link>`:
 
 ```tsx
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router";
 
 export default function FeedItem({ id }: { id: string }) {
   const location = useLocation();
@@ -184,7 +185,7 @@ When `appRouterBackgroundLocation` is set and matches an intercepting route's so
 - Intercepting pages render **in place of** the target page (no parallel slot). If you want the source page to remain visible behind a modal, render the modal yourself with a portal — `useLocation().state?.appRouterBackgroundLocation` tells you which page the user came from.
 - Hard refresh (F5) renders the canonical page. The plugin strips `appRouterBackgroundLocation` from `history.state` on `performance.navigation.type === 'reload'`, so the intercept fires only on soft (link-driven) navigation, mirroring Next.js. Back/forward still re-applies the intercept since the state is preserved on those entries.
 - `loading.tsx` inside an intercepting subtree is honored as the Suspense fallback for the intercepting page.
-- **BG outlet stays mounted.** When at least one `(.)`/`(..)` intercept is declared anywhere in the app, the plugin emits a `BrowserRouter` + `useRoutes` AppRouter (instead of `createBrowserRouter` + `RouterProvider`). The InnerRouter passes `state.appRouterBackgroundLocation` to `useRoutes` when the source+target pair matches, so React keeps the BG component instances (same DOM nodes, same component state) while the overlay's own `useRoutes` runs the intercept's route subtree against the live location. Trade-off: the `router` export is `null` in intercept mode (no `createBrowserRouter` instance) — use `useNavigate()` from `react-router-dom` for programmatic navigation.
+- **BG outlet stays mounted.** When at least one `(.)`/`(..)` intercept is declared anywhere in the app, the plugin emits a `BrowserRouter` + `useRoutes` AppRouter (instead of `createBrowserRouter` + `RouterProvider`). The InnerRouter passes `state.appRouterBackgroundLocation` to `useRoutes` when the source+target pair matches, so React keeps the BG component instances (same DOM nodes, same component state) while the overlay's own `useRoutes` runs the intercept's route subtree against the live location. Trade-off: the `router` export is `null` in intercept mode (no `createBrowserRouter` instance) — use `useNavigate()` from `react-router` for programmatic navigation.
 - **Shared route modules as intercepts.** An intercept marker can prefix a shared invocation: `feed/(..)[+photo]/` mounts the `+photo/` template as an interception with source `/feed` and target derived by climbing route ancestors (here `/photo/:id` if `+photo/[id]/page.tsx` exists). Each intercept entry carries a full route subtree (intercept template's layout + page wrapping the paired canonical's sub-shareds), so tab-style navigation inside the overlay keeps the shell mounted across `:param`/sub-route changes. Match the shared name to the desired URL segment — `[+photo]` adds `photo`, `[+photoModal]` adds `photoModal`. Paren form `(..)(+photo)/` works too (transparent — no segment added at the climbed level).
 - **Intercept-flavored template definitions.** A template can pre-declare its climb level by embedding the intercept marker in its definition name: `+(.)foo/`, `+(..)foo/`, `+(...)foo/`, `+(..)(..)foo/`. When a consumer invokes the template without a prefix (`[+foo]/`), the template's level is inherited and the subtree mounts as an interception. Consumer-side prefix `(.)[+foo]/` still works and overrides the template level. Removal/parametric/`props.tsx`/etc. rules are unchanged.
 - **Sibling intercept variants pair automatically.** Declaring `+(.)<name>/` next to `+<name>/` inside the same parent shared module produces an intercept variant of the canonical sub-shared. The intercept's `layout.tsx` + `page.tsx` replace the canonical's at the root of the overlay subtree, but the canonical's sub-shareds (`+info/`, `+atendimentos/`, ...) are inherited as children — so `/clientes/:id/info` still renders inside the overlay's layout shell when navigated soft. Opt out per mount with the intercept-only omit marker `[-(.)<name>]/` (the bare `[-<name>]/` still drops both variants).
@@ -217,7 +218,7 @@ src/app/
 
 ```tsx
 // src/app/layout.tsx
-import { Outlet } from "react-router-dom";
+import { Outlet } from "react-router";
 import { useSlot } from "vite-plugin-react-app-router/client";
 
 export default function RootLayout() {
@@ -418,7 +419,7 @@ import {
 // router - createBrowserRouter instance
 // Useful for programmatic navigation
 // NOT generated when intercepts are declared (BrowserRouter mode is used).
-// In that case use useNavigate() from react-router-dom inside components.
+// In that case use useNavigate() from react-router inside components.
 router.navigate("/about");
 
 // routes - Array of RouteObject
@@ -439,11 +440,11 @@ const { apiBase } = useSharedProps<{ apiBase: string }>();
 
 ## Layout Example
 
-Layouts must use `<Outlet />` from react-router-dom to render child routes:
+Layouts must use `<Outlet />` from react-router to render child routes:
 
 ```tsx
 // src/app/layout.tsx
-import { Outlet, Link } from "react-router-dom";
+import { Outlet, Link } from "react-router";
 
 export default function RootLayout() {
   return (
@@ -465,7 +466,7 @@ export default function RootLayout() {
 
 ```tsx
 // src/app/blog/[slug]/page.tsx
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link } from "react-router";
 
 export default function BlogPost() {
   const { slug } = useParams();
@@ -497,11 +498,11 @@ Loading components are inherited by child routes. If a child route doesn't have 
 
 ## Error Component Example
 
-The `error.tsx` file is used as an error boundary. It receives the error via `useRouteError` from react-router-dom:
+The `error.tsx` file is used as an error boundary. It receives the error via `useRouteError` from react-router:
 
 ```tsx
 // src/app/error.tsx
-import { useRouteError, Link } from "react-router-dom";
+import { useRouteError, Link } from "react-router";
 
 export default function ErrorBoundary() {
   const error = useRouteError() as Error;
@@ -528,7 +529,7 @@ When placed in the app root (`src/app/not-found.tsx`), it replaces the entire pa
 
 ```tsx
 // src/app/not-found.tsx
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 
 export default function NotFound() {
   return (
@@ -547,7 +548,7 @@ When placed inside a route directory with a layout, it renders inside that layou
 
 ```tsx
 // src/app/dashboard/not-found.tsx
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 
 export default function DashboardNotFound() {
   return (
@@ -625,22 +626,42 @@ src/app/
 
 ## Navigation
 
-Use `<Link>` from `react-router-dom` for client-side navigation. Using regular `<a>` tags will cause full page reloads:
+Use `<Link>` from `react-router` for client-side navigation. Using regular `<a>` tags will cause full page reloads:
 
 ```tsx
 // Correct - SPA navigation
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 <Link to="/about">About</Link>
 
 // Incorrect - full page reload
 <a href="/about">About</a>
 ```
 
+## React Router version
+
+React Router 8 removed the `react-router-dom` package: everything is imported from `react-router`, except `RouterProvider`, which comes from `react-router/dom`. The generated virtual module follows whatever your project has installed:
+
+| Installed                                   | Generated imports                   |
+| ------------------------------------------- | ----------------------------------- |
+| `react-router-dom` 6.x or 7.x               | `react-router-dom`                  |
+| `react-router` 7.x (without `react-router-dom`) | `react-router` + `react-router/dom` |
+| `react-router` 8.x                          | `react-router` + `react-router/dom` |
+
+Set `routerPackage: 'react-router'` or `routerPackage: 'react-router-dom'` in the plugin options to skip the detection.
+
+The examples in this README import from `react-router`, which works on 7.x and 8.x. On React Router 6, install `react-router-dom` and import `Link`, `Outlet`, `useNavigate`, etc. from it instead.
+
+When upgrading an existing app to React Router 8:
+
+1. `npm uninstall react-router-dom && npm install react-router@8` (React Router 8 requires React 19.2.7+).
+2. Point your own imports at `react-router` (and `RouterProvider`, if you use it directly, at `react-router/dom`).
+3. Nothing else changes: the plugin detects the new package and regenerates the routes.
+
 ## Requirements
 
 - Vite 5.x or 6.x
 - React 18.x or 19.x
-- react-router-dom 6.x or 7.x
+- `react-router-dom` 6.x/7.x or `react-router` 7.x/8.x (React Router 8 needs React 19.2.7+)
 
 ## License
 

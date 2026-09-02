@@ -5,7 +5,7 @@
 
 import type { PluginHookHandler } from "../commons/types.js";
 import type { ResolvedConfig, ViteDevServer, HmrContext } from "vite";
-import { parseAppRouter, generateDevRoutesCode, generateEmptyRoutesCode, type PluginOptions } from "../commons/index.js";
+import { parseAppRouter, generateDevRoutesCode, generateEmptyRoutesCode, resolveRouterPackage, type PluginOptions } from "../commons/index.js";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -70,9 +70,12 @@ function regenerateRoutes(): string {
             : path.join(rootDir, "src/app"));
     ctx.appDir = appDir;
 
+    // react-router-dom (v6/v7) or react-router + react-router/dom (v7/v8).
+    const routerPackage = resolveRouterPackage(rootDir, ctx.options.routerPackage);
+
     if (!fs.existsSync(appDir)) {
         console.warn(`[vite-plugin-react-app-router] App directory not found: ${appDir}`);
-        return generateEmptyRoutesCode();
+        return generateEmptyRoutesCode({ routerPackage });
     }
 
     const parsed = parseAppRouter({
@@ -85,6 +88,7 @@ function regenerateRoutes(): string {
     ctx.cachedCode = generateDevRoutesCode(parsed.routes, {
         rootDir,
         lazy,
+        routerPackage,
         rootNotFound: parsed.rootNotFound,
         intercepts: parsed.intercepts,
         tree: parsed.tree,
