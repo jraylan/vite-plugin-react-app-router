@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.2.3...v0.2.4) (2026-09-09)
+
+
+### Bug Fixes
+
+* **loading:** use loading.tsx for every Suspense fallback ([b57fdb4](https://github.com/jraylan/vite-plugin-react-app-router/commit/b57fdb403a4c03ce6701466ab8e7168a78bbc822))
+
 ## [0.2.3](https://github.com/jraylan/vite-plugin-react-app-router/compare/v0.2.2...v0.2.3) (2026-09-02)
 
 
