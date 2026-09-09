@@ -146,10 +146,14 @@ function createSuspenseWrapper(
     lazy: boolean,
     loadingComponentName?: string
 ): t.CallExpression {
-    // If a custom loading component is provided, use it; otherwise use a simple div
+    // Without a loading.tsx the fallback renders nothing. A router has no
+    // business painting copy into someone's app: the old `<div>Loading…</div>`
+    // shipped untranslated English, unstyled, once per lazy route — visible in
+    // every locale that isn't English, and impossible to theme. Rendering
+    // nothing is the neutral default; `loading.tsx` is how you opt into UI.
     const fallback = loadingComponentName
         ? createCreateElementCallExpression(loadingComponentName, t.nullLiteral(), [])
-        : createCreateElementCallExpression('div', t.nullLiteral(), [t.stringLiteral('Loading...')], true);
+        : t.nullLiteral();
 
     if (lazy) {
         return createCreateElementCallExpression(
@@ -512,7 +516,10 @@ function buildRouteExpression(
                                 layoutPattern ? notFoundPattern(layoutPattern, '/') : '*'
                             )
                         ),
-                        createRouteProperty('element', createSuspenseWrapper(layoutNotFoundName, lazy)),
+                        createRouteProperty(
+                            'element',
+                            createSuspenseWrapper(layoutNotFoundName, lazy, loadingName)
+                        ),
                     ])
                 );
             }
@@ -943,7 +950,11 @@ function buildSubtree(
                     ),
                     createRouteProperty(
                         'element',
-                        createSuspenseWrapper(notFoundName, ctx.lazy)
+                        createSuspenseWrapper(
+                            notFoundName,
+                            ctx.lazy,
+                            pickLoading(undefined, localLoading, ctx)
+                        )
                     ),
                 ])
             );
@@ -999,7 +1010,11 @@ function buildSubtree(
         return [
             makeLayoutNode(
                 node.layoutPath,
-                inheritedLoading,
+                // Um segmento cobre os filhos, nao o proprio layout - por
+                // isso o herdado. Menos na raiz, que nao tem de quem
+                // herdar: la o loading.tsx do segmento e a unica espera
+                // possivel, e quem o escreveu espera ve-lo.
+                isRoot ? localLoading : inheritedLoading,
                 wrapped,
                 ctx,
                 isRoot,
@@ -1103,7 +1118,11 @@ function buildSlotsObject(
                 definitionProps.push(
                     t.objectProperty(
                         t.identifier('defaultElement'),
-                        createSuspenseWrapper(defaultName, ctx.lazy)
+                        createSuspenseWrapper(
+                            defaultName,
+                            ctx.lazy,
+                            pickLoading(slot.loadingPath, undefined, ctx)
+                        )
                     )
                 );
             }
@@ -1606,7 +1625,14 @@ function generateRoutesAST(
         routeDefinitions.push(
             createRouteObject([
                 createRouteProperty('path', t.stringLiteral('*')),
-                createRouteProperty('element', createSuspenseWrapper(notFoundName, lazy)),
+                createRouteProperty(
+                    'element',
+                    createSuspenseWrapper(
+                        notFoundName,
+                        lazy,
+                        rootLoading ? loadingMap.get(rootLoading) : undefined
+                    )
+                ),
             ])
         );
     }
